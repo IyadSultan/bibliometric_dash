@@ -16,6 +16,16 @@ import sqlite3
 import json
 from collections import Counter
 import pycountry
+import networkx as nx
+import numpy as np
+import scipy
+from wordcloud import WordCloud
+import re
+import base64
+import io
+import matplotlib
+matplotlib.use('Agg')  # Set backend to Agg before importing pyplot
+import matplotlib.pyplot as plt
 
 # Keep the same DB_PATH if desired
 DB_PATH = 'khcc_papers.sqlite'
@@ -952,6 +962,188 @@ def create_department_charts():
     
     return fig_dept_sankey, fig_dept_bar
 
+def create_topic_knowledge_graph(papers_df):
+    # Extract and organize topics data
+    topic_connections = []
+    topic_to_papers = {}
+    
+    for _, paper in papers_df.iterrows():
+        if paper['topics'] and isinstance(paper['topics'], str):
+            try:
+                topics_data = json.loads(paper['topics'])
+                
+                # Create connections between topics in the same paper
+                paper_topics = []
+                for topic in topics_data:
+                    main_topic = topic['display_name']
+                    subfield = topic['subfield']['display_name']
+                    
+                    # Store both main topic and subfield
+                    paper_topics.extend([main_topic, subfield])
+                    
+                    # Store paper reference for each topic
+                    if main_topic not in topic_to_papers:
+                        topic_to_papers[main_topic] = []
+                    if subfield not in topic_to_papers:
+                        topic_to_papers[subfield] = []
+                    
+                    topic_to_papers[main_topic].append(paper['paper_id'])
+                    topic_to_papers[subfield].append(paper['paper_id'])
+                    
+                    # Connect main topic to its subfield
+                    topic_connections.append((main_topic, subfield))
+                
+                # Connect topics within the same paper
+                for i in range(len(paper_topics)):
+                    for j in range(i + 1, len(paper_topics)):
+                        topic_connections.append((paper_topics[i], paper_topics[j]))
+                        
+            except json.JSONDecodeError:
+                continue
+    
+    # Count topic frequencies and connections
+    topic_freq = Counter([topic for conn in topic_connections for topic in conn])
+    connection_freq = Counter(topic_connections)
+    
+    # Create network graph
+    nodes = []
+    edges = []
+    
+    # Add nodes (topics)
+    for topic, freq in topic_freq.items():
+        nodes.append({
+            'id': topic,
+            'label': topic,
+            'size': np.log1p(freq) * 10,  # Scale node size by frequency
+            'papers_count': len(set(topic_to_papers.get(topic, [])))
+        })
+    
+    # Add edges (connections)
+    for (source, target), weight in connection_freq.items():
+        edges.append({
+            'source': source,
+            'target': target,
+            'weight': weight
+        })
+    
+    # Create the network graph using plotly
+    fig = go.Figure()
+    
+    # Create network layout using networkx
+    G = nx.Graph()
+    for edge in edges:
+        G.add_edge(edge['source'], edge['target'], weight=edge['weight'])
+    
+    pos = nx.spring_layout(G, k=1/np.sqrt(len(nodes)), iterations=50)
+    
+    # Add edges
+    edge_x = []
+    edge_y = []
+    for edge in edges:
+        x0, y0 = pos[edge['source']]
+        x1, y1 = pos[edge['target']]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+    
+    fig.add_trace(go.Scatter(
+        x=edge_x, y=edge_y,
+        line=dict(width=0.5, color='#888'),
+        hoverinfo='none',
+        mode='lines'
+    ))
+    
+    # Add nodes
+    node_x = []
+    node_y = []
+    node_text = []
+    node_size = []
+    
+    for node in nodes:
+        x, y = pos[node['id']]
+        node_x.append(x)
+        node_y.append(y)
+        node_text.append(f"{node['label']}<br>Papers: {node['papers_count']}")
+        node_size.append(node['size'])
+    
+    fig.add_trace(go.Scatter(
+        x=node_x, y=node_y,
+        mode='markers+text',
+        hoverinfo='text',
+        text=node_text,
+        textposition="top center",
+        marker=dict(
+            showscale=True,
+            size=node_size,
+            colorscale='YlGnBu',
+            reversescale=True,
+            color=[],
+            line_width=2
+        )
+    ))
+    
+    fig.update_layout(
+        title='Research Topics Knowledge Graph',
+        showlegend=False,
+        hovermode='closest',
+        margin=dict(b=20,l=5,r=5,t=40),
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+    )
+    
+    return fig, topic_to_papers
+
+def create_topics_wordcloud(papers_df):
+    # Collect all topic names
+    all_topics = []
+    for _, paper in papers_df.iterrows():
+        if paper['topics'] and isinstance(paper['topics'], str):
+            try:
+                topics_data = json.loads(paper['topics'])
+                for topic in topics_data:
+                    # Add main topic
+                    all_topics.append(topic['display_name'])
+                    # Add subfield
+                    all_topics.append(topic['subfield']['display_name'])
+            except json.JSONDecodeError:
+                continue
+    
+    # Join all topics into a single string
+    text = ' '.join(all_topics)
+    
+    # Define stopwords
+    stopwords = set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
+                    'of', 'with', 'by', 'from', 'up', 'about', 'into', 'over', 'after',
+                    'research', 'study', 'studies', 'analysis', 'based'])
+    
+    try:
+        # Create WordCloud with simpler configuration
+        wordcloud = WordCloud(
+            width=800,
+            height=400,
+            background_color='white',
+            stopwords=stopwords,
+            min_font_size=10,
+            max_font_size=150,
+            prefer_horizontal=0.7
+        ).generate(text)
+        
+        # Convert to image without using matplotlib directly
+        img = wordcloud.to_image()
+        
+        # Save to buffer
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG')
+        buffer.seek(0)
+        
+        # Encode
+        image_base64 = base64.b64encode(buffer.getvalue()).decode()
+        
+        return f'data:image/png;base64,{image_base64}'
+    
+    except Exception as e:
+        print(f"Error generating wordcloud: {str(e)}")
+        return ''
+
 # Then modify the tab_overview definition to include these charts
 tab_overview = dbc.Card(
     dbc.CardBody([
@@ -1028,6 +1220,46 @@ tab_collaboration = dbc.Card(
                 dcc.Graph(figure=create_department_charts()[1])
             ], width=6)
         ], className="mt-4")
+    ]),
+    className="mt-3"
+)
+
+# Create a new tab for the knowledge graph
+tab_knowledge_graph = dbc.Card(
+    dbc.CardBody([
+        html.H4("Research Topics Analysis", className="card-title"),
+        dbc.Row([
+            dbc.Col([
+                html.H5("Topics Word Cloud", className="text-center mb-3"),
+                html.Img(
+                    id='topics-wordcloud',
+                    src=create_topics_wordcloud(papers_df),
+                    style={'width': '100%', 'height': 'auto'}
+                ),
+            ], width=12, className="mb-4"),
+        ]),
+        dbc.Row([
+            dbc.Col([
+                html.H5("Topics Knowledge Graph", className="text-center mb-3"),
+                dcc.Graph(
+                    id='topic-knowledge-graph',
+                    figure=create_topic_knowledge_graph(papers_df)[0],
+                    style={'height': '800px'}
+                ),
+            ], width=12),
+        ]),
+        dbc.Modal(
+            [
+                dbc.ModalHeader(dbc.ModalTitle("Topic-Related Papers")),
+                dbc.ModalBody(id="topic-papers-content"),
+                dbc.ModalFooter(
+                    dbc.Button("Close", id="close-topic-modal", className="ms-auto")
+                ),
+            ],
+            id="topic-papers-modal",
+            size="xl",
+            scrollable=True
+        )
     ]),
     className="mt-3"
 )
@@ -1282,6 +1514,7 @@ app.layout = dbc.Container([
         dbc.Tab(tab_journals, label="Journal Metrics", tab_id="tab-journals"),
         dbc.Tab(tab_publication_types, label="Publication Types", tab_id="tab-publication-types"),
         dbc.Tab(tab_publications, label="Publications List", tab_id="tab-publications"),
+        dbc.Tab(tab_knowledge_graph, label="Knowledge Graph", tab_id="tab-knowledge-graph"),
     ]),
 ], fluid=True)
 
@@ -1496,6 +1729,38 @@ def update_filter(search_value):
 )
 def update_page_size(selected_size):
     return int(selected_size)
+
+# Add callback for topic node clicks
+@app.callback(
+    [Output("topic-papers-modal", "is_open"),
+     Output("topic-papers-content", "children")],
+    [Input("topic-knowledge-graph", "clickData")],
+    [State("topic-papers-modal", "is_open")]
+)
+def show_topic_papers(clickData, is_open):
+    if clickData is None:
+        return False, None
+        
+    topic = clickData['points'][0]['text'].split('<br>')[0]
+    _, topic_to_papers = create_topic_knowledge_graph(papers_df)
+    
+    if topic in topic_to_papers:
+        paper_ids = topic_to_papers[topic]
+        related_papers = papers_df[papers_df['paper_id'].isin(paper_ids)]
+        
+        paper_list = []
+        for _, paper in related_papers.iterrows():
+            paper_list.append(
+                html.Div([
+                    html.H6(paper['title']),
+                    html.P(f"Published in {paper['journal_name']} ({paper['publication_year']})"),
+                    html.Hr()
+                ])
+            )
+        
+        return True, paper_list
+    
+    return False, None
 
 # ------------------------------------------------------------------------------
 # 9. Run Server
