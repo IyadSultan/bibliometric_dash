@@ -14,6 +14,8 @@ from dash.dash_table.Format import Format, Scheme
 import pandas as pd
 import sqlite3
 import json
+from collections import Counter
+import pycountry
 
 # Keep the same DB_PATH if desired
 DB_PATH = 'khcc_papers.sqlite'
@@ -24,25 +26,6 @@ app = dash.Dash(
     external_stylesheets=[dbc.themes.BOOTSTRAP],
     suppress_callback_exceptions=True
 )
-
-# ------------------------------------------------------------------------------
-# 2.1 Global Filters
-# ------------------------------------------------------------------------------
-publication_type_filter = dbc.Row([
-    dbc.Col([
-        html.Label("Publication Types:", className="fw-bold"),
-        dcc.Dropdown(
-            id='publication-type-filter',
-            options=[],  # Will be populated on load
-            multi=True,
-            placeholder="Select publication types...",
-            value=[],
-            className="mb-3"
-        ),
-        # Add a debug div to show current filter value
-        html.Div(id='debug-output', style={'color': 'gray', 'fontSize': '12px'})
-    ], width=12)
-], className="mt-2 mb-3")
 
 # 3. Data Loading
 # ------------------------------------------------------------------------------
@@ -346,6 +329,500 @@ if len(is_open_access_counts) == 2:
 else:
     fig_open_access = px.pie(title="Open Access Distribution (No data)")
 
+# Add these functions before defining any layout components
+def extract_institutions_and_countries(authorships):
+    """Extract unique institutions and countries from authorships data"""
+    if isinstance(authorships, str):
+        # Convert string to list of dictionaries if needed
+        authorships = json.loads(authorships)
+    
+    institutions = []
+    countries = []
+    
+    for authorship in authorships:
+        # Check if author is from KHCC
+        is_khcc_author = False
+        if 'institutions' in authorship:
+            for inst in authorship['institutions']:
+                if inst['display_name'] == "King Hussein Cancer Center":
+                    is_khcc_author = True
+                    break
+                institutions.append(inst['display_name'])
+        
+        # Only add countries if author is not from KHCC
+        if not is_khcc_author and 'countries' in authorship:
+            countries.extend(authorship['countries'])
+    
+    return institutions, countries
+
+def extract_external_authors(authorships):
+    """Extract authors who are not from KHCC"""
+    if isinstance(authorships, str):
+        authorships = json.loads(authorships)
+    
+    external_authors = []
+    
+    for authorship in authorships:
+        # Check if author is from KHCC
+        is_khcc_author = False
+        if 'institutions' in authorship:
+            for inst in authorship['institutions']:
+                if inst['display_name'] == "King Hussein Cancer Center":
+                    is_khcc_author = True
+                    break
+        
+        # Only add author if they're not from KHCC
+        if not is_khcc_author and 'author' in authorship:
+            external_authors.append(authorship['author']['display_name'])
+    
+    return external_authors
+
+def create_frequency_charts(exclude_khcc=True):
+    """Create frequency charts for institutions, countries, and external authors"""
+    all_institutions = []
+    all_countries = []
+    all_external_authors = []
+    
+    for authorships in papers_df['authorships'].dropna():
+        institutions, countries = extract_institutions_and_countries(authorships)
+        external_authors = extract_external_authors(authorships)
+        
+        # Filter out KHCC if exclude_khcc is True
+        if exclude_khcc:
+            institutions = [inst for inst in institutions if inst != "King Hussein Cancer Center"]
+            
+        all_institutions.extend(institutions)
+        all_countries.extend(countries)
+        all_external_authors.extend(external_authors)
+    
+    # Count frequencies
+    inst_counts = Counter(all_institutions)
+    country_counts = Counter(all_countries)
+    author_counts = Counter(all_external_authors)
+    
+    # Create external authors bar chart - Top 20
+    author_df = pd.DataFrame.from_dict(author_counts, orient='index', columns=['count']).reset_index()
+    author_df.columns = ['Author', 'Count']
+    author_df = author_df.nlargest(20, 'Count')  # Get top 20
+    
+    fig_authors = px.bar(author_df, 
+                        x='Count', 
+                        y='Author',
+                        orientation='h',
+                        title='Top 20 External Collaborating Authors')
+    fig_authors.update_layout(
+        yaxis={'categoryorder': 'total ascending'},
+        height=600
+    )
+    
+    # Create institution bar chart - Top 20
+    inst_df = pd.DataFrame.from_dict(inst_counts, orient='index', columns=['count']).reset_index()
+    inst_df.columns = ['Institution', 'Count']
+    inst_df = inst_df.nlargest(20, 'Count')
+    
+    fig_inst = px.bar(inst_df, 
+                      x='Count', 
+                      y='Institution',
+                      orientation='h',
+                      title='Top 20 Collaborating Institutions')
+    fig_inst.update_layout(
+        yaxis={'categoryorder': 'total ascending'},
+        height=600
+    )
+    
+    # Create country bar chart and map - Top 20
+    country_df = pd.DataFrame.from_dict(country_counts, orient='index', columns=['count']).reset_index()
+    country_df.columns = ['Country', 'Count']
+    country_df = country_df.nlargest(20, 'Count')
+    
+    # Create world map
+    country_iso3 = {}
+    for country_code in country_df['Country']:
+        try:
+            country = pycountry.countries.get(alpha_2=country_code)
+            if country:
+                country_iso3[country_code] = country.alpha_3
+        except:
+            continue
+    
+    country_df['ISO3'] = country_df['Country'].map(country_iso3)
+    
+    fig_map = px.choropleth(
+        country_df,
+        locations='ISO3',
+        color='Count',
+        hover_name='Country',
+        color_continuous_scale='Viridis',
+        title='Global Research Collaboration Network (Top 20 Countries)'
+    )
+    fig_map.update_layout(
+        height=600,
+        geo=dict(
+            showframe=False,
+            showcoastlines=True,
+            projection_type='equirectangular'
+        )
+    )
+    
+    fig_country = px.bar(country_df, 
+                        x='Count', 
+                        y='Country',
+                        orientation='h',
+                        title='Top 20 Collaborating Countries')
+    fig_country.update_layout(
+        yaxis={'categoryorder': 'total ascending'},
+        height=600
+    )
+    
+    return fig_inst, fig_country, fig_map, fig_authors
+
+def extract_khcc_and_collaborator_links(authorships):
+    """Extract KHCC authors and their collaborators from a paper"""
+    if isinstance(authorships, str):
+        authorships = json.loads(authorships)
+    
+    khcc_authors = []
+    external_authors = []
+    
+    # First pass to identify KHCC authors
+    for authorship in authorships:
+        is_khcc_author = False
+        if 'institutions' in authorship:
+            for inst in authorship['institutions']:
+                if inst['display_name'] == "King Hussein Cancer Center":
+                    is_khcc_author = True
+                    khcc_authors.append(authorship['author']['display_name'])
+                    break
+        
+        if not is_khcc_author and 'author' in authorship:
+            external_authors.append(authorship['author']['display_name'])
+    
+    # Create links between KHCC authors and external authors
+    links = []
+    for khcc_author in khcc_authors:
+        for external_author in external_authors:
+            links.append((khcc_author, external_author))
+    
+    return links
+
+def create_sankey_diagram():
+    """Create a Sankey diagram showing top 10 KHCC authors and top 10 collaborators"""
+    # Collect all collaboration links
+    all_links = []
+    for authorships in papers_df['authorships'].dropna():
+        links = extract_khcc_and_collaborator_links(authorships)
+        all_links.extend(links)
+    
+    # Count frequencies of collaborations
+    collaboration_counts = Counter(all_links)
+    
+    # Get top 10 KHCC authors by number of collaborations
+    khcc_author_counts = Counter()
+    for (khcc_author, _), count in collaboration_counts.items():
+        khcc_author_counts[khcc_author] += count
+    top_khcc_authors = [author for author, _ in khcc_author_counts.most_common(10)]
+    
+    # Get top 10 collaborators for these KHCC authors
+    external_author_counts = Counter()
+    for (khcc_author, external_author), count in collaboration_counts.items():
+        if khcc_author in top_khcc_authors:
+            external_author_counts[external_author] += count
+    top_external_authors = [author for author, _ in external_author_counts.most_common(10)]
+    
+    # Create node lists and get their indices
+    nodes = top_khcc_authors + top_external_authors
+    node_indices = {node: idx for idx, node in enumerate(nodes)}
+    
+    # Create source, target, and value lists for Sankey diagram
+    sources = []
+    targets = []
+    values = []
+    
+    for (khcc_author, external_author), count in collaboration_counts.items():
+        if khcc_author in top_khcc_authors and external_author in top_external_authors:
+            sources.append(node_indices[khcc_author])
+            targets.append(node_indices[external_author])
+            values.append(count)
+    
+    fig_sankey = go.Figure(data=[go.Sankey(
+        node = dict(
+            pad = 50,
+            thickness = 20,
+            line = dict(color = "black", width = 0.5),
+            label = nodes,
+            color = ["#1f77b4"]*len(top_khcc_authors) + ["#ff7f0e"]*len(top_external_authors)
+        ),
+        link = dict(
+            source = sources,
+            target = targets,
+            value = values
+        ),
+        arrangement = "snap"
+    )])
+    
+    fig_sankey.update_layout(
+        title=dict(
+            text="Top 10 KHCC Researchers (blue) and Top 10 External Collaborators (orange)",
+            y=0.95,
+            x=0.5,
+            xanchor='center',
+            yanchor='top'
+        ),
+        font=dict(size=12),
+        height=800,
+        width=1200,
+        margin=dict(l=250, r=250, t=50, b=50)
+    )
+    
+    return fig_sankey
+
+def extract_khcc_institution_country_links(authorships):
+    """Extract KHCC authors' links with institutions and countries"""
+    if isinstance(authorships, str):
+        authorships = json.loads(authorships)
+    
+    khcc_authors = []
+    external_institutions = []
+    external_countries = []
+    
+    # First identify KHCC authors and collect external institutions/countries
+    for authorship in authorships:
+        is_khcc_author = False
+        author_name = authorship['author']['display_name']
+        
+        if 'institutions' in authorship:
+            for inst in authorship['institutions']:
+                if inst['display_name'] == "King Hussein Cancer Center":
+                    is_khcc_author = True
+                    khcc_authors.append(author_name)
+                    break
+                
+        if not is_khcc_author:
+            if 'institutions' in authorship:
+                for inst in authorship['institutions']:
+                    external_institutions.append((author_name, inst['display_name']))
+            if 'countries' in authorship:
+                for country in authorship['countries']:
+                    external_countries.append((author_name, country))
+    
+    return khcc_authors, external_institutions, external_countries
+
+def create_institution_country_sankeys():
+    """Create Sankey diagrams for top 10 KHCC authors with top 10 institutions and countries"""
+    # Collect all links
+    all_khcc_authors = set()
+    all_institution_links = []
+    all_country_links = []
+    
+    for authorships in papers_df['authorships'].dropna():
+        khcc_authors, inst_links, country_links = extract_khcc_institution_country_links(authorships)
+        all_khcc_authors.update(khcc_authors)
+        all_institution_links.extend(inst_links)
+        all_country_links.extend(country_links)
+    
+    # Get top 10 KHCC authors by total collaborations
+    khcc_author_counts = Counter()
+    for author in all_khcc_authors:
+        inst_count = sum(1 for a, _ in all_institution_links if a == author)
+        country_count = sum(1 for a, _ in all_country_links if a == author)
+        khcc_author_counts[author] = inst_count + country_count
+    top_khcc_authors = [author for author, _ in khcc_author_counts.most_common(10)]
+    
+    # Count frequencies for institutions and countries
+    institution_counts = Counter(dict(Counter(x[1] for x in all_institution_links 
+                                            if x[0] in top_khcc_authors)))
+    country_counts = Counter(dict(Counter(x[1] for x in all_country_links 
+                                        if x[0] in top_khcc_authors)))
+    
+    # Get top 10 institutions and countries
+    top_institutions = [inst for inst, _ in institution_counts.most_common(10)]
+    top_countries = [country for country, _ in country_counts.most_common(10)]
+    
+    # Filter links to only include top 10 KHCC authors and top institutions/countries
+    filtered_inst_links = [(author, inst) for author, inst in all_institution_links 
+                          if author in top_khcc_authors and inst in top_institutions]
+    filtered_country_links = [(author, country) for author, country in all_country_links 
+                            if author in top_khcc_authors and country in top_countries]
+    
+    # Create Institution Sankey
+    inst_nodes = top_khcc_authors + top_institutions
+    inst_node_indices = {node: idx for idx, node in enumerate(inst_nodes)}
+    
+    inst_sources = []
+    inst_targets = []
+    inst_values = []
+    
+    # Count author-institution collaborations
+    for author in top_khcc_authors:
+        for inst in top_institutions:
+            count = sum(1 for a, i in filtered_inst_links if a == author and i == inst)
+            if count > 0:
+                inst_sources.append(inst_node_indices[author])
+                inst_targets.append(inst_node_indices[inst])
+                inst_values.append(count)
+    
+    fig_inst_sankey = go.Figure(data=[go.Sankey(
+        node = dict(
+            pad = 50,
+            thickness = 20,
+            line = dict(color = "black", width = 0.5),
+            label = inst_nodes,
+            color = ["#1f77b4"]*len(top_khcc_authors) + ["#ff7f0e"]*len(top_institutions)
+        ),
+        link = dict(
+            source = inst_sources,
+            target = inst_targets,
+            value = inst_values
+        ),
+        arrangement = "snap"
+    )])
+    
+    fig_inst_sankey.update_layout(
+        title=dict(
+            text="Top 10 KHCC Researchers (blue) and Top 10 Collaborating Institutions (orange)",
+            y=0.95,
+            x=0.5,
+            xanchor='center',
+            yanchor='top'
+        ),
+        font=dict(size=12),
+        height=800,
+        width=1200,
+        margin=dict(l=250, r=250, t=50, b=50)
+    )
+    
+    # Create Country Sankey
+    country_nodes = top_khcc_authors + top_countries
+    country_node_indices = {node: idx for idx, node in enumerate(country_nodes)}
+    
+    country_sources = []
+    country_targets = []
+    country_values = []
+    
+    # Count author-country collaborations
+    for author in top_khcc_authors:
+        for country in top_countries:
+            count = sum(1 for a, c in filtered_country_links if a == author and c == country)
+            if count > 0:
+                country_sources.append(country_node_indices[author])
+                country_targets.append(country_node_indices[country])
+                country_values.append(count)
+    
+    fig_country_sankey = go.Figure(data=[go.Sankey(
+        node = dict(
+            pad = 50,
+            thickness = 20,
+            line = dict(color = "black", width = 0.5),
+            label = country_nodes,
+            color = ["#1f77b4"]*len(top_khcc_authors) + ["#ff7f0e"]*len(top_countries)
+        ),
+        link = dict(
+            source = country_sources,
+            target = country_targets,
+            value = country_values
+        ),
+        arrangement = "snap"
+    )])
+    
+    fig_country_sankey.update_layout(
+        title=dict(
+            text="Top 10 KHCC Researchers (blue) and Top 10 Collaborating Countries (orange)",
+            y=0.95,
+            x=0.5,
+            xanchor='center',
+            yanchor='top'
+        ),
+        font=dict(size=12),
+        height=800,
+        width=1200,
+        margin=dict(l=250, r=250, t=50, b=50)
+    )
+    
+    return fig_inst_sankey, fig_country_sankey
+
+# Then modify the tab_overview definition to include these charts
+tab_overview = dbc.Card(
+    dbc.CardBody([
+        html.H4("Publications Overview", className="card-title"),
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H5(f"Total Publications: {len(papers_df):,}"),
+                        html.H5(f"Total Citations: {int(papers_df['citations'].sum()):,}"),
+                        html.H5(f"Average Citations: {papers_df['citations'].mean():.1f}"),
+                        html.H5(f"Open Access: "
+                                f"{papers_df['is_open_access'].sum():,} "
+                                f"({(papers_df['is_open_access'].mean()*100):.1f}%)")
+                    ])
+                ])
+            ], md=12)
+        ]),
+        dbc.Row([
+            dbc.Col(dcc.Graph(figure=fig_pubs), md=6),
+            dbc.Col(dcc.Graph(figure=fig_cites), md=6),
+        ]),
+        html.H3("Research Collaboration Network", className="mt-4"),
+        dbc.Row([
+            dbc.Col([
+                dcc.Graph(id='institution-chart', figure=create_frequency_charts()[0])
+            ], width=6),
+            dbc.Col([
+                dcc.Graph(id='country-chart', figure=create_frequency_charts()[1])
+            ], width=6)
+        ], className="mt-4")
+    ]),
+    className="mt-3"
+)
+
+# Create a new tab for collaboration analysis
+tab_collaboration = dbc.Card(
+    dbc.CardBody([
+        html.H4("Research Collaboration Network", className="card-title"),
+        dbc.Row([
+            dbc.Col([
+                html.H5("Global Collaboration Map", className="text-center"),
+                dcc.Graph(figure=create_frequency_charts()[2])
+            ], width=12)
+        ]),
+        dbc.Row([
+            dbc.Col([
+                html.H5("Author Collaboration Network", className="text-center"),
+                dcc.Graph(figure=create_sankey_diagram())
+            ], width=12)
+        ], className="mt-4"),
+        dbc.Row([
+            dbc.Col([
+                html.H5("Institution Collaboration Network", className="text-center"),
+                dcc.Graph(figure=create_institution_country_sankeys()[0])
+            ], width=12)
+        ], className="mt-4"),
+        dbc.Row([
+            dbc.Col([
+                html.H5("Country Collaboration Network", className="text-center"),
+                dcc.Graph(figure=create_institution_country_sankeys()[1])
+            ], width=12)
+        ], className="mt-4"),
+        dbc.Row([
+            dbc.Col([
+                html.H5("Top External Collaborating Authors", className="text-center"),
+                dcc.Graph(figure=create_frequency_charts()[3])
+            ], width=12)
+        ], className="mt-4"),
+        dbc.Row([
+            dbc.Col([
+                html.H5("Top Collaborating Institutions", className="text-center"),
+                dcc.Graph(figure=create_frequency_charts()[0])
+            ], width=6),
+            dbc.Col([
+                html.H5("Top Collaborating Countries", className="text-center"),
+                dcc.Graph(figure=create_frequency_charts()[1])
+            ], width=6)
+        ], className="mt-4")
+    ]),
+    className="mt-3"
+)
+
 # ------------------------------------------------------------------------------
 # 5. Define Tab Contents
 # ------------------------------------------------------------------------------
@@ -371,7 +848,16 @@ tab_overview = dbc.Card(
         dbc.Row([
             dbc.Col(dcc.Graph(figure=fig_pubs), md=6),
             dbc.Col(dcc.Graph(figure=fig_cites), md=6),
-        ])
+        ]),
+        html.H3("Research Collaboration Network", className="mt-4"),
+        dbc.Row([
+            dbc.Col([
+                dcc.Graph(id='institution-chart', figure=create_frequency_charts()[0])
+            ], width=6),
+            dbc.Col([
+                dcc.Graph(id='country-chart', figure=create_frequency_charts()[1])
+            ], width=6)
+        ], className="mt-4")
     ]),
     className="mt-3"
 )
@@ -596,9 +1082,9 @@ app.layout = dbc.Container([
         dark=True,
         className="mb-2"
     ),
-    publication_type_filter,
     dbc.Tabs([
         dbc.Tab(tab_overview, label="Overview", tab_id="tab-overview"),
+        dbc.Tab(tab_collaboration, label="Collaboration Network", tab_id="tab-collaboration"),
         dbc.Tab(tab_authors, label="Authors", tab_id="tab-authors"),
         dbc.Tab(tab_citations, label="Citations", tab_id="tab-citations"),
         dbc.Tab(tab_journals, label="Journal Metrics", tab_id="tab-journals"),
@@ -722,164 +1208,9 @@ def update_filter(search_value):
 def update_page_size(selected_size):
     return int(selected_size)
 
-# 2. Separate callback just to populate the dropdown options on page load
-@app.callback(
-    Output('publication-type-filter', 'options'),
-    Input('publication-type-filter', 'id')
-)
-def populate_filter_options(_):
-    # Get unique types and normalize them
-    types = papers_df['type'].dropna().str.strip().str.lower().unique()
-    types = sorted(types)
-    print("\nFilter options:")
-    print("Available types:", types)
-    return [{'label': t.title(), 'value': t} for t in types]
-
-# 3. Debug callback to verify filter changes are detected
-@app.callback(
-    Output('debug-output', 'children'),
-    Input('publication-type-filter', 'value')
-)
-def debug_filter_value(selected_types):
-    print("Debug - Selected types:", selected_types)
-    return f"Selected: {selected_types}"
-
-# 4. Main callback for updating the tabs
-@app.callback(
-    [Output('tab-overview', 'children'),
-     Output('tab-authors', 'children'),
-     Output('tab-citations', 'children'),
-     Output('tab-journals', 'children'),
-     Output('tab-publication-types', 'children'),
-     Output('tab-publications', 'children')],
-    [Input('publication-type-filter', 'value')]
-)
-def update_tabs_with_filter(selected_types):
-    print("\nDEBUG FILTERING:")
-    print("Selected types:", selected_types)
-    
-    # Filter the dataframe
-    filtered_df = papers_df.copy()
-    
-    # Debug information about the 'type' column
-    print("\nColumn info:")
-    print("Type column dtype:", filtered_df['type'].dtype)
-    print("Unique values in type column:", filtered_df['type'].unique())
-    print("Value counts:", filtered_df['type'].value_counts())
-    
-    if selected_types and len(selected_types) > 0:
-        print("\nBefore filtering:", len(filtered_df))
-        
-        # Check for exact matches
-        for type_val in selected_types:
-            matching_rows = filtered_df[filtered_df['type'] == type_val]
-            print(f"Rows matching exactly '{type_val}': {len(matching_rows)}")
-        
-        # Apply filter with string normalization
-        filtered_df['type'] = filtered_df['type'].str.strip().str.lower()
-        selected_types = [t.strip().lower() for t in selected_types]
-        
-        filtered_df = filtered_df[filtered_df['type'].isin(selected_types)]
-        print("After filtering:", len(filtered_df))
-        
-        # Show sample of filtered data
-        print("\nSample of filtered data:")
-        print(filtered_df[['title', 'type']].head())
-    
-    # Create figures with filtered data
-    fig_pubs, fig_cites, fig_quartile_trend = create_figures(filtered_df)
-    fig_type_pie, fig_type_trend = create_publication_type_figures(filtered_df)
-    
-    # Create new tab contents with filtered data
-    new_tab_overview = dbc.Card(
-        dbc.CardBody([
-            html.H4("Publications Overview", className="card-title"),
-            dbc.Row([
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardBody([
-                            html.H5(f"Total Publications: {len(filtered_df):,}"),
-                            html.H5(f"Total Citations: {int(filtered_df['citations'].sum()):,}"),
-                            html.H5(f"Average Citations: {filtered_df['citations'].mean():.1f}"),
-                            html.H5(f"Open Access: "
-                                   f"{filtered_df['is_open_access'].sum():,} "
-                                   f"({(filtered_df['is_open_access'].mean()*100):.1f}%)")
-                        ])
-                    ])
-                ], md=12)
-            ]),
-            dbc.Row([
-                dbc.Col(dcc.Graph(figure=fig_pubs), md=6),
-                dbc.Col(dcc.Graph(figure=fig_cites), md=6),
-            ])
-        ]),
-        className="mt-3"
-    )
-    
-    new_tab_publication_types = dbc.Card(
-        dbc.CardBody([
-            html.H4("Publication Types Analysis", className="card-title"),
-            html.Div(f"Showing {len(filtered_df)} publications", className="mb-3"),  # Added count
-            dbc.Row([
-                dbc.Col(dcc.Graph(figure=fig_type_pie), md=6),
-                dbc.Col(dcc.Graph(figure=fig_type_trend), md=6),
-            ])
-        ]),
-        className="mt-3"
-    )
-    
-    # Update publications table with filtered data
-    new_tab_publications = dbc.Card(
-        dbc.CardBody([
-            html.H4("Publications List", className="card-title"),
-            html.Div(f"Showing {len(filtered_df)} publications", className="mb-3"),  # Added count
-            dash_table.DataTable(
-                id='publications-table',
-                data=[{
-                    **row,
-                    'authors': ', '.join([author['author']['display_name'] for author in json.loads(row['authorships'])]) if row.get('authorships') else '',
-                    'details': '🔍 View'
-                } for row in filtered_df.sort_values(
-                    by=['publication_year', 'publication_month'],
-                    ascending=[False, False]
-                ).to_dict('records')],
-                columns=[
-                    {'name': 'Title', 'id': 'title'},
-                    {'name': 'Authors', 'id': 'authors'},
-                    {'name': 'Journal', 'id': 'journal_name'},
-                    {'name': 'Year', 'id': 'publication_year', 'type': 'numeric'},
-                    {'name': 'Month', 'id': 'publication_month', 'type': 'numeric'},
-                    {'name': 'Citations', 'id': 'citations', 'type': 'numeric'},
-                    {'name': 'Details', 'id': 'details', 'presentation': 'markdown'}
-                ],
-                page_size=50,
-                style_table={'overflowX': 'auto'},
-                style_cell={
-                    'textAlign': 'left',
-                    'padding': '10px',
-                    'whiteSpace': 'normal',
-                    'height': 'auto',
-                },
-                style_data={
-                    'whiteSpace': 'normal',
-                    'height': 'auto',
-                },
-                style_header={
-                    'backgroundColor': 'rgb(230, 230, 230)',
-                    'fontWeight': 'bold'
-                }
-            )
-        ]),
-        className="mt-3"
-    )
-    
-    # Create other tabs similarly...
-    
-    return (new_tab_overview, new_tab_authors, new_tab_citations, 
-            new_tab_journals, new_tab_publication_types, new_tab_publications)
-
 # ------------------------------------------------------------------------------
 # 9. Run Server
 # ------------------------------------------------------------------------------
 if __name__ == '__main__':
     app.run_server(debug=True, port=8050)
+
