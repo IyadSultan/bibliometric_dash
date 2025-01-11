@@ -41,7 +41,7 @@ def load_data():
             quartile,
             citations,
             is_open_access,
-            authorships as authors,  -- Use authorships as authors
+            authorships as authors,
             abstract,
             pdf_url,
             CAST(strftime('%Y', publication_date) AS INTEGER) as publication_year,
@@ -75,8 +75,84 @@ def load_data():
     
     return papers_df, authors_df
 
-# Load the data
+def create_figures(papers_df):
+    # Group by year
+    yearly_metrics = (
+        papers_df.groupby("publication_year")
+        .agg({
+            "citations": ["sum", "mean", "count"]
+        })
+        .reset_index()
+    )
+    yearly_metrics.columns = ["publication_year", "total_citations", "mean_citations", "publications"]
+    
+    # Publications by Year
+    fig_pubs = px.line(
+        yearly_metrics[yearly_metrics["publication_year"] > 0],
+        x="publication_year",
+        y="publications",
+        title="Publications by Year",
+        labels={"publication_year": "Year", "publications": "Number of Publications"},
+        markers=True
+    )
+    
+    # Average Citations per Year with total citations on secondary axis
+    fig_cites = px.line(
+        yearly_metrics[yearly_metrics["publication_year"] > 0],
+        x="publication_year",
+        y="mean_citations",
+        title="Average Citations per Publication Year",
+        labels={"mean_citations": "Average Citations"},
+        markers=True
+    )
+    # Add total citations line
+    fig_cites.add_scatter(
+        x=yearly_metrics["publication_year"],
+        y=yearly_metrics["total_citations"],
+        name="Total Citations",
+        yaxis="y2",
+        line=dict(dash="dash")
+    )
+    fig_cites.update_layout(
+        yaxis2=dict(
+            title="Total Citations",
+            overlaying="y",
+            side="right"
+        )
+    )
+    
+    # Create quartile distribution by year
+    quartile_by_year = pd.crosstab(
+        papers_df['publication_year'], 
+        papers_df['quartile'],
+        margins=False
+    ).reset_index()
+    
+    # Create stacked bar chart for quartile distribution
+    fig_quartile_trend = px.bar(
+        quartile_by_year,
+        x='publication_year',
+        y=['Q1', 'Q2', 'Q3', 'Q4', 'Unknown'],
+        title='Journal Quartile Distribution by Year',
+        labels={
+            'publication_year': 'Year',
+            'value': 'Number of Publications',
+            'variable': 'Quartile'
+        },
+        color_discrete_sequence=['#2ecc71', '#3498db', '#f1c40f', '#e74c3c', '#95a5a6']
+    )
+    
+    fig_quartile_trend.update_layout(
+        barmode='stack',
+        legend_title='Quartile',
+        xaxis_tickangle=0
+    )
+    
+    return fig_pubs, fig_cites, fig_quartile_trend
+
+# Now load data and create figures
 papers_df, authors_df = load_data()
+fig_pubs, fig_cites, fig_quartile_trend = create_figures(papers_df)
 
 # ------------------------------------------------------------------------------
 # 4. Data Preprocessing & Figure Creation
@@ -315,7 +391,10 @@ tab_journals = dbc.Card(
             dbc.Col(dcc.Graph(figure=fig_quartile), md=4),
             dbc.Col(dcc.Graph(figure=fig_impact_factor), md=4),
             dbc.Col(dcc.Graph(figure=fig_open_access), md=4),
-        ])
+        ]),
+        dbc.Row([
+            dbc.Col(dcc.Graph(figure=fig_quartile_trend), md=12),
+        ], className="mt-3")
     ]),
     className="mt-3"
 )
@@ -340,7 +419,7 @@ publications_table = dash_table.DataTable(
     ],
     data=[{
         **row,
-        'authors': ', '.join(eval(row['authors'])) if row.get('authors') else '',
+        'authors': ', '.join([author['author']['display_name'] for author in json.loads(row['authorships'])]) if row.get('authorships') else '',
         'details': '🔍 View'
     } for row in papers_df.sort_values(
         by=['publication_year', 'publication_month'],
