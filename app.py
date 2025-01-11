@@ -26,6 +26,24 @@ app = dash.Dash(
 )
 
 # ------------------------------------------------------------------------------
+# 2.1 Global Filters
+# ------------------------------------------------------------------------------
+publication_type_filter = dbc.Row([
+    dbc.Col([
+        html.Label("Publication Types:", className="fw-bold"),
+        dcc.Dropdown(
+            id='publication-type-filter',
+            options=[],  # Will be populated on load
+            multi=True,
+            placeholder="Select publication types...",
+            value=[],
+            className="mb-3"
+        ),
+        # Add a debug div to show current filter value
+        html.Div(id='debug-output', style={'color': 'gray', 'fontSize': '12px'})
+    ], width=12)
+], className="mt-2 mb-3")
+
 # 3. Data Loading
 # ------------------------------------------------------------------------------
 def load_data():
@@ -41,9 +59,10 @@ def load_data():
             quartile,
             citations,
             is_open_access,
-            authorships as authors,
+            authorships,
             abstract,
             pdf_url,
+            type,
             CAST(strftime('%Y', publication_date) AS INTEGER) as publication_year,
             CAST(strftime('%m', publication_date) AS INTEGER) as publication_month
         FROM papers
@@ -399,6 +418,63 @@ tab_journals = dbc.Card(
     className="mt-3"
 )
 
+## 5.5 Publication Types Tab
+def create_publication_type_figures(df):
+    print("Creating figures with DataFrame size:", len(df))  # Debug print
+    
+    # Create pie chart of publication types
+    type_counts = df['type'].value_counts()
+    print("Publication type counts:", type_counts)  # Debug print
+    
+    fig_type_pie = px.pie(
+        values=type_counts.values,
+        names=type_counts.index,
+        title=f"Distribution of Publication Types (Total: {len(df)})"
+    )
+
+    # Create stacked bar chart of publication types by year
+    type_by_year = pd.crosstab(
+        df['publication_year'], 
+        df['type'],
+        margins=False
+    ).reset_index()
+    
+    print("Type by year data:", type_by_year)  # Debug print
+    
+    fig_type_trend = px.bar(
+        type_by_year,
+        x='publication_year',
+        y=type_by_year.columns[1:],  # All columns except publication_year
+        title=f'Publication Types by Year (Total: {len(df)})',
+        labels={
+            'publication_year': 'Year',
+            'value': 'Number of Publications',
+            'variable': 'Publication Type'
+        }
+    )
+    
+    fig_type_trend.update_layout(
+        barmode='stack',
+        legend_title='Publication Type',
+        xaxis_tickangle=0
+    )
+    
+    return fig_type_pie, fig_type_trend
+
+# Create initial figures
+fig_type_pie, fig_type_trend = create_publication_type_figures(papers_df)
+
+tab_publication_types = dbc.Card(
+    dbc.CardBody([
+        html.H4("Publication Types Analysis", className="card-title"),
+        dbc.Row([
+            dbc.Col(dcc.Graph(figure=fig_type_pie), md=6),
+            dbc.Col(dcc.Graph(figure=fig_type_trend), md=6),
+        ])
+    ]),
+    className="mt-3"
+)
+
 # ------------------------------------------------------------------------------
 # 6. Publications List Tab (from your new code -- DO NOT TOUCH!)
 # ------------------------------------------------------------------------------
@@ -520,11 +596,13 @@ app.layout = dbc.Container([
         dark=True,
         className="mb-2"
     ),
+    publication_type_filter,
     dbc.Tabs([
         dbc.Tab(tab_overview, label="Overview", tab_id="tab-overview"),
         dbc.Tab(tab_authors, label="Authors", tab_id="tab-authors"),
         dbc.Tab(tab_citations, label="Citations", tab_id="tab-citations"),
         dbc.Tab(tab_journals, label="Journal Metrics", tab_id="tab-journals"),
+        dbc.Tab(tab_publication_types, label="Publication Types", tab_id="tab-publication-types"),
         dbc.Tab(tab_publications, label="Publications List", tab_id="tab-publications"),
     ]),
 ], fluid=True)
@@ -643,6 +721,162 @@ def update_filter(search_value):
 )
 def update_page_size(selected_size):
     return int(selected_size)
+
+# 2. Separate callback just to populate the dropdown options on page load
+@app.callback(
+    Output('publication-type-filter', 'options'),
+    Input('publication-type-filter', 'id')
+)
+def populate_filter_options(_):
+    # Get unique types and normalize them
+    types = papers_df['type'].dropna().str.strip().str.lower().unique()
+    types = sorted(types)
+    print("\nFilter options:")
+    print("Available types:", types)
+    return [{'label': t.title(), 'value': t} for t in types]
+
+# 3. Debug callback to verify filter changes are detected
+@app.callback(
+    Output('debug-output', 'children'),
+    Input('publication-type-filter', 'value')
+)
+def debug_filter_value(selected_types):
+    print("Debug - Selected types:", selected_types)
+    return f"Selected: {selected_types}"
+
+# 4. Main callback for updating the tabs
+@app.callback(
+    [Output('tab-overview', 'children'),
+     Output('tab-authors', 'children'),
+     Output('tab-citations', 'children'),
+     Output('tab-journals', 'children'),
+     Output('tab-publication-types', 'children'),
+     Output('tab-publications', 'children')],
+    [Input('publication-type-filter', 'value')]
+)
+def update_tabs_with_filter(selected_types):
+    print("\nDEBUG FILTERING:")
+    print("Selected types:", selected_types)
+    
+    # Filter the dataframe
+    filtered_df = papers_df.copy()
+    
+    # Debug information about the 'type' column
+    print("\nColumn info:")
+    print("Type column dtype:", filtered_df['type'].dtype)
+    print("Unique values in type column:", filtered_df['type'].unique())
+    print("Value counts:", filtered_df['type'].value_counts())
+    
+    if selected_types and len(selected_types) > 0:
+        print("\nBefore filtering:", len(filtered_df))
+        
+        # Check for exact matches
+        for type_val in selected_types:
+            matching_rows = filtered_df[filtered_df['type'] == type_val]
+            print(f"Rows matching exactly '{type_val}': {len(matching_rows)}")
+        
+        # Apply filter with string normalization
+        filtered_df['type'] = filtered_df['type'].str.strip().str.lower()
+        selected_types = [t.strip().lower() for t in selected_types]
+        
+        filtered_df = filtered_df[filtered_df['type'].isin(selected_types)]
+        print("After filtering:", len(filtered_df))
+        
+        # Show sample of filtered data
+        print("\nSample of filtered data:")
+        print(filtered_df[['title', 'type']].head())
+    
+    # Create figures with filtered data
+    fig_pubs, fig_cites, fig_quartile_trend = create_figures(filtered_df)
+    fig_type_pie, fig_type_trend = create_publication_type_figures(filtered_df)
+    
+    # Create new tab contents with filtered data
+    new_tab_overview = dbc.Card(
+        dbc.CardBody([
+            html.H4("Publications Overview", className="card-title"),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H5(f"Total Publications: {len(filtered_df):,}"),
+                            html.H5(f"Total Citations: {int(filtered_df['citations'].sum()):,}"),
+                            html.H5(f"Average Citations: {filtered_df['citations'].mean():.1f}"),
+                            html.H5(f"Open Access: "
+                                   f"{filtered_df['is_open_access'].sum():,} "
+                                   f"({(filtered_df['is_open_access'].mean()*100):.1f}%)")
+                        ])
+                    ])
+                ], md=12)
+            ]),
+            dbc.Row([
+                dbc.Col(dcc.Graph(figure=fig_pubs), md=6),
+                dbc.Col(dcc.Graph(figure=fig_cites), md=6),
+            ])
+        ]),
+        className="mt-3"
+    )
+    
+    new_tab_publication_types = dbc.Card(
+        dbc.CardBody([
+            html.H4("Publication Types Analysis", className="card-title"),
+            html.Div(f"Showing {len(filtered_df)} publications", className="mb-3"),  # Added count
+            dbc.Row([
+                dbc.Col(dcc.Graph(figure=fig_type_pie), md=6),
+                dbc.Col(dcc.Graph(figure=fig_type_trend), md=6),
+            ])
+        ]),
+        className="mt-3"
+    )
+    
+    # Update publications table with filtered data
+    new_tab_publications = dbc.Card(
+        dbc.CardBody([
+            html.H4("Publications List", className="card-title"),
+            html.Div(f"Showing {len(filtered_df)} publications", className="mb-3"),  # Added count
+            dash_table.DataTable(
+                id='publications-table',
+                data=[{
+                    **row,
+                    'authors': ', '.join([author['author']['display_name'] for author in json.loads(row['authorships'])]) if row.get('authorships') else '',
+                    'details': '🔍 View'
+                } for row in filtered_df.sort_values(
+                    by=['publication_year', 'publication_month'],
+                    ascending=[False, False]
+                ).to_dict('records')],
+                columns=[
+                    {'name': 'Title', 'id': 'title'},
+                    {'name': 'Authors', 'id': 'authors'},
+                    {'name': 'Journal', 'id': 'journal_name'},
+                    {'name': 'Year', 'id': 'publication_year', 'type': 'numeric'},
+                    {'name': 'Month', 'id': 'publication_month', 'type': 'numeric'},
+                    {'name': 'Citations', 'id': 'citations', 'type': 'numeric'},
+                    {'name': 'Details', 'id': 'details', 'presentation': 'markdown'}
+                ],
+                page_size=50,
+                style_table={'overflowX': 'auto'},
+                style_cell={
+                    'textAlign': 'left',
+                    'padding': '10px',
+                    'whiteSpace': 'normal',
+                    'height': 'auto',
+                },
+                style_data={
+                    'whiteSpace': 'normal',
+                    'height': 'auto',
+                },
+                style_header={
+                    'backgroundColor': 'rgb(230, 230, 230)',
+                    'fontWeight': 'bold'
+                }
+            )
+        ]),
+        className="mt-3"
+    )
+    
+    # Create other tabs similarly...
+    
+    return (new_tab_overview, new_tab_authors, new_tab_citations, 
+            new_tab_journals, new_tab_publication_types, new_tab_publications)
 
 # ------------------------------------------------------------------------------
 # 9. Run Server
