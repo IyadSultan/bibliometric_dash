@@ -32,7 +32,7 @@ app = dash.Dash(
 def load_data():
     conn = sqlite3.connect(DB_PATH)
     
-    # Modified SQL query to include authors field
+    # Modified SQL query to include all necessary fields
     papers_df = pd.read_sql_query("""
         SELECT 
             paper_id,
@@ -44,8 +44,14 @@ def load_data():
             is_open_access,
             authorships,
             abstract,
-            pdf_url,
+            abstract_summary,
+            REPLACE(pdf_url, '@', '') as pdf_url,
             type,
+            pmid,
+            publication_date,
+            keywords,
+            concepts,
+            topics,
             CAST(strftime('%Y', publication_date) AS INTEGER) as publication_year,
             CAST(strftime('%m', publication_date) AS INTEGER) as publication_month
         FROM papers
@@ -74,6 +80,8 @@ def load_data():
     papers_df["citations"] = papers_df["citations"].fillna(0)
     papers_df["quartile"] = papers_df["quartile"].fillna("Unknown")
     papers_df["impact_factor"] = papers_df["impact_factor"].fillna(0)
+    papers_df["abstract_summary"] = papers_df["abstract_summary"].fillna("No summary available")
+    papers_df["pmid"] = papers_df["pmid"].fillna("N/A")
     
     return papers_df, authors_df
 
@@ -965,16 +973,7 @@ tab_overview = dbc.Card(
         dbc.Row([
             dbc.Col(dcc.Graph(figure=fig_pubs), md=6),
             dbc.Col(dcc.Graph(figure=fig_cites), md=6),
-        ]),
-        html.H3("Research Collaboration Network", className="mt-4"),
-        dbc.Row([
-            dbc.Col([
-                dcc.Graph(id='institution-chart', figure=create_frequency_charts()[0])
-            ], width=6),
-            dbc.Col([
-                dcc.Graph(id='country-chart', figure=create_frequency_charts()[1])
-            ], width=6)
-        ], className="mt-4")
+        ])
     ]),
     className="mt-3"
 )
@@ -1058,16 +1057,7 @@ tab_overview = dbc.Card(
         dbc.Row([
             dbc.Col(dcc.Graph(figure=fig_pubs), md=6),
             dbc.Col(dcc.Graph(figure=fig_cites), md=6),
-        ]),
-        html.H3("Research Collaboration Network", className="mt-4"),
-        dbc.Row([
-            dbc.Col([
-                dcc.Graph(id='institution-chart', figure=create_frequency_charts()[0])
-            ], width=6),
-            dbc.Col([
-                dcc.Graph(id='country-chart', figure=create_frequency_charts()[1])
-            ], width=6)
-        ], className="mt-4")
+        ])
     ]),
     className="mt-3"
 )
@@ -1238,14 +1228,6 @@ tab_publications = dbc.Card(
         html.H4("Publications List", className="card-title"),
         dbc.Row([
             dbc.Col([
-                dbc.Input(
-                    id="search-input",
-                    type="text",
-                    placeholder="Search in titles, authors, abstracts...",
-                    className="mb-3"
-                ),
-            ], width=9),
-            dbc.Col([
                 dbc.Select(
                     id="page-size-select",
                     options=[
@@ -1258,7 +1240,7 @@ tab_publications = dbc.Card(
                     value="50",
                     className="mb-3"
                 ),
-            ], width=3),
+            ], width=12),
         ]),
         html.Div(
             f"Showing {total_pubs} publications in total",
@@ -1347,6 +1329,7 @@ def show_paper_details(active_cell, virtual_data, page_current, page_size):
         if 'authorships' in row and row['authorships']:
             authorships = json.loads(row['authorships'])
         
+        # Format authors with KHCC authors in bold
         formatted_authors = []
         for authorship in authorships:
             author_name = authorship['author']['display_name']
@@ -1354,46 +1337,142 @@ def show_paper_details(active_cell, virtual_data, page_current, page_size):
             
             if 'institutions' in authorship:
                 for inst in authorship['institutions']:
-                    # Check KHCC ID
                     if inst.get('id') == 'https://openalex.org/I2799468983':
                         is_khcc_author = True
                         break
-            # Bold if KHCC
-            if is_khcc_author:
-                formatted_authors.append(f"**{author_name}**")
-            else:
-                formatted_authors.append(author_name)
+            formatted_authors.append(f"**{author_name}**" if is_khcc_author else author_name)
         
         authors_text = ", ".join(formatted_authors)
         
-        content = [
-            html.H5(row["title"]),
-            html.P([html.Strong("Authors: "), dcc.Markdown(authors_text)]),
-            html.P([html.Strong("Journal: "), row.get("journal_name", "Unknown")]),
-            html.P([html.Strong("Year: "), str(row.get("publication_year", "N/A"))]),
+        # Extract concepts and format them
+        concepts = []
+        if 'concepts' in row and row['concepts']:
+            try:
+                concepts_data = json.loads(row['concepts'])
+                concepts = [f"{concept['display_name']} ({concept['score']:.2f})" 
+                          for concept in concepts_data 
+                          if float(concept.get('score', 0)) > 0.4]
+            except:
+                concepts = []
+
+        # Extract topics
+        topics = []
+        if 'topics' in row and row['topics']:
+            try:
+                topics_data = json.loads(row['topics'])
+                topics = [f"{topic['display_name']} ({topic['subfield']['display_name']})" 
+                         for topic in topics_data]
+            except:
+                topics = []
+
+        # Journal and metrics section with modified impact factor display
+        metrics_col2 = [
+            html.P([html.Strong("Citations: "), str(row.get("citations", 0))]),
+            html.P([html.Strong("Quartile: "), row.get("quartile", "N/A")])
         ]
         
-        # Add PDF link if present
-        if row.get('pdf_url'):
-            content.append(
+        # Only add impact factor if it's greater than 0
+        if row.get('impact_factor', 0) > 0:
+            metrics_col2.insert(0, 
                 html.P([
-                    html.Strong("PDF: "),
-                    html.A("Download PDF", href=row['pdf_url'], target="_blank",
-                           className="btn btn-primary btn-sm")
+                    html.Strong("Impact Factor: "), 
+                    f"{row.get('impact_factor', 0):.2f}",
+                    html.Span(" (based on 2024 estimates)", 
+                             className="text-muted small ms-1")
                 ])
             )
         
-        # Add abstract
-        content.append(html.P([
-            html.Strong("Abstract: "),
-            row.get("abstract", "No abstract available")
-        ]))
+        # Create the modal content
+        content = [
+            html.H5(row["title"], className="mb-3"),
+            
+            # Authors section
+            html.P([html.Strong("Authors: "), dcc.Markdown(authors_text)]),
+            
+            # Journal and metrics section
+            dbc.Row([
+                dbc.Col([
+                    html.P([html.Strong("Journal: "), row.get("journal_name", "Unknown")]),
+                    html.P([html.Strong("Publication Date: "), row.get("publication_date", "N/A")]),
+                    html.P([html.Strong("PMID: "), str(row.get("pmid", "N/A"))]),
+                ], width=6),
+                dbc.Col(metrics_col2, width=6),
+            ], className="mb-3"),
+            
+            # Abstract section
+            html.Div([
+                html.Strong("Abstract: "),
+                html.P(row.get("abstract", "No abstract available"), 
+                      className="mt-2 text-justify"),
+            ], className="mb-3"),
+            
+            # Abstract summary if available
+            html.Div([
+                html.Strong("Abstract Summary: "),
+                html.P(row.get("abstract_summary", "No summary available"),
+                      className="mt-2 text-justify"),
+            ], className="mb-3") if row.get("abstract_summary") else None,
+            
+            # Keywords, concepts, and topics
+            dbc.Row([
+                dbc.Col([
+                    html.Strong("Keywords: "),
+                    html.P(", ".join(json.loads(row["keywords"])) if row.get("keywords") else "No keywords available"),
+                ], width=12, className="mb-2"),
+                
+                dbc.Col([
+                    html.Strong("Key Concepts: "),
+                    html.P(", ".join(concepts) if concepts else "No concepts available"),
+                ], width=12, className="mb-2"),
+                
+                dbc.Col([
+                    html.Strong("Research Topics: "),
+                    html.P(", ".join(topics) if topics else "No topics available"),
+                ], width=12, className="mb-2"),
+            ], className="mb-3"),
+        ]
+        
+        # Add PDF link if present - modified section
+        pdf_url = row.get('pdf_url')
+        if pdf_url and pdf_url.strip() and pdf_url.strip() != 'None':
+            # Remove any '@' symbol if present at the start
+            pdf_url = pdf_url.strip().lstrip('@')
+            
+            content.append(
+                html.Div([
+                    dbc.Button(
+                        [
+                            html.I(className="fas fa-file-pdf me-2"), 
+                            "Download PDF"
+                        ],
+                        href=pdf_url,
+                        target="_blank",
+                        color="primary",
+                        className="mt-3",
+                        external_link=True
+                    )
+                ])
+            )
+            # Add a text link as fallback
+            content.append(
+                html.Div([
+                    html.A(
+                        "Direct PDF Link",
+                        href=pdf_url,
+                        target="_blank",
+                        className="mt-2 d-block"
+                    )
+                ])
+            )
         
         return content
     
     except Exception as e:
         print(f"Error in modal content: {str(e)}")
-        return html.Div("Error loading paper details", style={'color': 'red'})
+        return html.Div([
+            "Error loading paper details",
+            html.Pre(str(e))  # This will help debug the error
+        ], style={'color': 'red'})
 
 
 @app.callback(
