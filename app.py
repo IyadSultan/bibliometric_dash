@@ -28,28 +28,29 @@ app = dash.Dash(
 # ------------------------------------------------------------------------------
 # 3. Data Loading
 # ------------------------------------------------------------------------------
-def load_papers_data():
-    """Loads the `papers` table from the database."""
+def load_data():
     conn = sqlite3.connect(DB_PATH)
-    papers_df = pd.read_sql_query("SELECT * FROM papers", conn)
-    conn.close()
     
-    # Add publication_month column if it doesn't exist
-    if 'publication_date' in papers_df.columns:
-        papers_df['publication_month'] = pd.to_datetime(papers_df['publication_date']).dt.month
-    else:
-        papers_df['publication_month'] = 1  # default fallback
+    # Modified SQL query to include authors field
+    papers_df = pd.read_sql_query("""
+        SELECT 
+            paper_id,
+            title,
+            journal_name,
+            impact_factor,
+            quartile,
+            citations,
+            is_open_access,
+            authorships as authors,  -- Use authorships as authors
+            abstract,
+            pdf_url,
+            CAST(strftime('%Y', publication_date) AS INTEGER) as publication_year,
+            CAST(strftime('%m', publication_date) AS INTEGER) as publication_month
+        FROM papers
+    """, conn)
     
-    return papers_df
-
-def load_authors_data():
-    """
-    Loads the 'khcc_authors' table joined with relevant columns from 'papers'.
-    Adjust the JOIN condition or columns based on your DB schema.
-    """
-    conn = sqlite3.connect(DB_PATH)
-    authors_df = pd.read_sql_query(
-        """
+    # Load authors data with enhanced details
+    authors_df = pd.read_sql_query("""
         SELECT 
             ka.*,
             p.citations,
@@ -59,23 +60,23 @@ def load_authors_data():
             p.is_open_access,
             p.impact_factor
         FROM khcc_authors ka
-        JOIN papers p 
-            ON ka.paper_id = p.openalex_id
-        """, 
-        conn
-    )
+        JOIN papers p ON ka.paper_id = p.openalex_id
+    """, conn)
+    
     conn.close()
-    return authors_df
+    
+    # Clean and prepare papers data
+    papers_df["publication_year"] = papers_df["publication_year"].fillna(0).astype(int)
+    papers_df["publication_month"] = papers_df["publication_month"].fillna(0).astype(int)
+    papers_df["journal_name"] = papers_df["journal_name"].fillna("Unknown Journal")
+    papers_df["citations"] = papers_df["citations"].fillna(0)
+    papers_df["quartile"] = papers_df["quartile"].fillna("Unknown")
+    papers_df["impact_factor"] = papers_df["impact_factor"].fillna(0)
+    
+    return papers_df, authors_df
 
 # Load the data
-papers_df = load_papers_data()
-
-# Attempt to load authors data (if table exists)
-try:
-    authors_df = load_authors_data()
-except Exception as e:
-    print("Could not load authors data. Make sure 'khcc_authors' table and 'openalex_id' exist.")
-    authors_df = pd.DataFrame()
+papers_df, authors_df = load_data()
 
 # ------------------------------------------------------------------------------
 # 4. Data Preprocessing & Figure Creation
