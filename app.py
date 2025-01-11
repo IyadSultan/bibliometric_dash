@@ -962,92 +962,92 @@ def create_department_charts():
     
     return fig_dept_sankey, fig_dept_bar
 
-def create_topic_knowledge_graph(papers_df):
+
+def create_enhanced_topic_graph(papers_df, min_papers=3, min_connections=2):
+    """
+    Creates an enhanced topic knowledge graph with better spacing and filtering.
+    
+    Args:
+        papers_df: DataFrame containing papers data
+        min_papers: Minimum number of papers for a topic to be included
+        min_connections: Minimum number of connections for an edge to be shown
+    """
     # Extract and organize topics data
     topic_connections = []
+    topic_counts = Counter()
     topic_to_papers = {}
     
     for _, paper in papers_df.iterrows():
         if paper['topics'] and isinstance(paper['topics'], str):
             try:
                 topics_data = json.loads(paper['topics'])
-                
-                # Create connections between topics in the same paper
                 paper_topics = []
+                
+                # Extract main topics and subfields
                 for topic in topics_data:
                     main_topic = topic['display_name']
-                    subfield = topic['subfield']['display_name']
+                    paper_topics.append(main_topic)
                     
-                    # Store both main topic and subfield
-                    paper_topics.extend([main_topic, subfield])
+                    # Count papers per topic
+                    topic_counts[main_topic] += 1
                     
-                    # Store paper reference for each topic
+                    # Store paper reference
                     if main_topic not in topic_to_papers:
                         topic_to_papers[main_topic] = []
-                    if subfield not in topic_to_papers:
-                        topic_to_papers[subfield] = []
-                    
                     topic_to_papers[main_topic].append(paper['paper_id'])
-                    topic_to_papers[subfield].append(paper['paper_id'])
-                    
-                    # Connect main topic to its subfield
-                    topic_connections.append((main_topic, subfield))
                 
-                # Connect topics within the same paper
+                # Create connections between topics in same paper
                 for i in range(len(paper_topics)):
                     for j in range(i + 1, len(paper_topics)):
                         topic_connections.append((paper_topics[i], paper_topics[j]))
                         
-            except json.JSONDecodeError:
+            except:
                 continue
     
-    # Count topic frequencies and connections
-    topic_freq = Counter([topic for conn in topic_connections for topic in conn])
-    connection_freq = Counter(topic_connections)
+    # Filter topics by minimum paper count
+    significant_topics = {topic for topic, count in topic_counts.items() 
+                         if count >= min_papers}
+    
+    # Count connections between significant topics
+    connection_counts = Counter(tuple(sorted(conn)) for conn in topic_connections 
+                              if conn[0] in significant_topics and conn[1] in significant_topics)
+    
+    # Filter connections by minimum count
+    significant_connections = {conn: count for conn, count in connection_counts.items() 
+                             if count >= min_connections}
     
     # Create network graph
-    nodes = []
-    edges = []
+    G = nx.Graph()
     
-    # Add nodes (topics)
-    for topic, freq in topic_freq.items():
-        nodes.append({
-            'id': topic,
-            'label': topic,
-            'size': np.log1p(freq) * 10,  # Scale node size by frequency
-            'papers_count': len(set(topic_to_papers.get(topic, [])))
-        })
+    # Add edges with weights
+    for (source, target), weight in significant_connections.items():
+        G.add_edge(source, target, weight=weight)
     
-    # Add edges (connections)
-    for (source, target), weight in connection_freq.items():
-        edges.append({
-            'source': source,
-            'target': target,
-            'weight': weight
-        })
+    # Calculate layout with more spacing
+    pos = nx.spring_layout(G, k=2/np.sqrt(len(G.nodes())), iterations=50)
     
-    # Create the network graph using plotly
+    # Create the figure
     fig = go.Figure()
     
-    # Create network layout using networkx
-    G = nx.Graph()
-    for edge in edges:
-        G.add_edge(edge['source'], edge['target'], weight=edge['weight'])
-    
-    pos = nx.spring_layout(G, k=1/np.sqrt(len(nodes)), iterations=50)
-    
-    # Add edges
+    # Add edges with varying width based on weight
     edge_x = []
     edge_y = []
-    for edge in edges:
-        x0, y0 = pos[edge['source']]
-        x1, y1 = pos[edge['target']]
+    edge_weights = []
+    
+    for (source, target), weight in significant_connections.items():
+        x0, y0 = pos[source]
+        x1, y1 = pos[target]
         edge_x.extend([x0, x1, None])
         edge_y.extend([y0, y1, None])
+        edge_weights.extend([weight, weight, None])
     
+    # Add edges with varying width
     fig.add_trace(go.Scatter(
         x=edge_x, y=edge_y,
-        line=dict(width=0.5, color='#888'),
+        line=dict(
+            width=1,
+            color='rgba(150,150,150,0.5)'
+        ),
         hoverinfo='none',
         mode='lines'
     ))
@@ -1057,40 +1057,80 @@ def create_topic_knowledge_graph(papers_df):
     node_y = []
     node_text = []
     node_size = []
+    node_colors = []
     
-    for node in nodes:
-        x, y = pos[node['id']]
+    # Calculate node metrics for colors
+    degrees = dict(G.degree())
+    max_degree = max(degrees.values()) if degrees else 1
+    
+    for node in G.nodes():
+        x, y = pos[node]
         node_x.append(x)
         node_y.append(y)
-        node_text.append(f"{node['label']}<br>Papers: {node['papers_count']}")
-        node_size.append(node['size'])
+        papers_count = topic_counts[node]
+        degree = degrees[node]
+        
+        # Create hover text
+        node_text.append(
+            f"Topic: {node}<br>"
+            f"Papers: {papers_count}<br>"
+            f"Connections: {degree}"
+        )
+        
+        # Size based on paper count
+        node_size.append(np.log1p(papers_count) * 20)
+        
+        # Color based on degree centrality
+        node_colors.append(degree / max_degree)
     
+    # Add nodes with custom styling
     fig.add_trace(go.Scatter(
         x=node_x, y=node_y,
         mode='markers+text',
         hoverinfo='text',
-        text=node_text,
+        text=[node for node in G.nodes()],
         textposition="top center",
+        hovertext=node_text,
         marker=dict(
             showscale=True,
             size=node_size,
-            colorscale='YlGnBu',
-            reversescale=True,
-            color=[],
-            line_width=2
-        )
+            colorscale='Viridis',
+            reversescale=False,
+            color=node_colors,
+            colorbar=dict(
+                title='Connectivity<br>Degree',
+                thickness=15,
+                x=1.02
+            ),
+            line=dict(color='white', width=1)
+        ),
+        textfont=dict(size=10)
     ))
     
+    # Update layout for better spacing and interactivity
     fig.update_layout(
-        title='Research Topics Knowledge Graph',
+        title=dict(
+            text='Research Topics Network<br>'
+                 f'<span style="font-size: 12px">Showing topics with ≥{min_papers} papers '
+                 f'and ≥{min_connections} connections</span>',
+            x=0.5,
+            y=0.95
+        ),
         showlegend=False,
         hovermode='closest',
-        margin=dict(b=20,l=5,r=5,t=40),
+        margin=dict(b=20, l=5, r=5, t=60),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        plot_bgcolor='white'
     )
     
     return fig, topic_to_papers
+
+
+
+
+
+
 
 def create_topics_wordcloud(papers_df):
     # Collect all topic names
@@ -1225,6 +1265,7 @@ tab_collaboration = dbc.Card(
 )
 
 # Create a new tab for the knowledge graph
+# Modified Knowledge Graph tab with controls
 tab_knowledge_graph = dbc.Card(
     dbc.CardBody([
         html.H4("Research Topics Analysis", className="card-title"),
@@ -1240,30 +1281,53 @@ tab_knowledge_graph = dbc.Card(
         ]),
         dbc.Row([
             dbc.Col([
+                html.H5("Graph Controls", className="mb-3"),
+                dbc.Row([
+                    dbc.Col([
+                        html.Label("Minimum Papers per Topic"),
+                        dcc.Slider(
+                            id='min-papers-slider',
+                            min=1,
+                            max=10,
+                            value=3,
+                            marks={i: str(i) for i in range(1, 11)},
+                            step=1
+                        ),
+                    ], width=6),
+                    dbc.Col([
+                        html.Label("Minimum Connections"),
+                        dcc.Slider(
+                            id='min-connections-slider',
+                            min=1,
+                            max=5,
+                            value=2,
+                            marks={i: str(i) for i in range(1, 6)},
+                            step=1
+                        ),
+                    ], width=6),
+                ], className="mb-3"),
+            ], width=12),
+        ]),
+        dbc.Row([
+            dbc.Col([
                 html.H5("Topics Knowledge Graph", className="text-center mb-3"),
                 dcc.Graph(
                     id='topic-knowledge-graph',
-                    figure=create_topic_knowledge_graph(papers_df)[0],
-                    style={'height': '800px'}
+    figure=create_enhanced_topic_graph(papers_df, 3, 2)[0],
+    style={'height': '800px'}
                 ),
             ], width=12),
         ]),
-        dbc.Modal(
-            [
-                dbc.ModalHeader(dbc.ModalTitle("Topic-Related Papers")),
-                dbc.ModalBody(id="topic-papers-content"),
-                dbc.ModalFooter(
-                    dbc.Button("Close", id="close-topic-modal", className="ms-auto")
-                ),
-            ],
-            id="topic-papers-modal",
-            size="xl",
-            scrollable=True
-        )
+        dbc.Modal([
+            dbc.ModalHeader(dbc.ModalTitle("Topic-Related Papers")),
+            dbc.ModalBody(id="topic-papers-content"),
+            dbc.ModalFooter(
+                dbc.Button("Close", id="close-topic-modal", className="ms-auto")
+            ),
+        ], id="topic-papers-modal", size="xl", scrollable=True)
     ]),
     className="mt-3"
 )
-
 # ------------------------------------------------------------------------------
 # 5. Define Tab Contents
 # ------------------------------------------------------------------------------
@@ -1522,6 +1586,16 @@ app.layout = dbc.Container([
 # 8. Callbacks
 # ------------------------------------------------------------------------------
 # Keep your new code callbacks for the publications tab
+# Add callback to update graph based on slider values
+@app.callback(
+    Output('topic-knowledge-graph', 'figure'),
+    [Input('min-papers-slider', 'value'),
+     Input('min-connections-slider', 'value')]
+)
+def update_knowledge_graph(min_papers, min_connections):
+    fig, _ = create_enhanced_topic_graph(papers_df, min_papers, min_connections)
+    return fig
+
 
 @app.callback(
     Output("paper-modal", "is_open"),
