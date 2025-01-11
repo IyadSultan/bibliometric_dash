@@ -505,43 +505,81 @@ def extract_khcc_and_collaborator_links(authorships):
     
     return links
 
+def extract_khcc_authors(authorships):
+    """Extract only authors who are affiliated with KHCC"""
+    if isinstance(authorships, str):
+        authorships = json.loads(authorships)
+    
+    khcc_authors = []
+    for authorship in authorships:
+        if 'institutions' in authorship:
+            for inst in authorship['institutions']:
+                # Check specifically for KHCC using its OpenAlex ID
+                if inst.get('id') == 'https://openalex.org/I2799468983':
+                    khcc_authors.append(authorship['author']['display_name'])
+                    break
+    return khcc_authors
+
 def create_sankey_diagram():
     """Create a Sankey diagram showing top 10 KHCC authors and top 10 collaborators"""
-    # Collect all collaboration links
-    all_links = []
+    # Collect all KHCC authors and their collaborations
+    khcc_collaborations = []
+    all_khcc_authors = set()
+    
     for authorships in papers_df['authorships'].dropna():
-        links = extract_khcc_and_collaborator_links(authorships)
-        all_links.extend(links)
+        auth_data = json.loads(authorships) if isinstance(authorships, str) else authorships
+        
+        # Get KHCC authors in this paper
+        khcc_authors = extract_khcc_authors(auth_data)
+        all_khcc_authors.update(khcc_authors)
+        
+        # Get external authors
+        external_authors = []
+        for auth in auth_data:
+            is_khcc = False
+            if 'institutions' in auth:
+                for inst in auth['institutions']:
+                    if inst.get('id') == 'https://openalex.org/I2799468983':
+                        is_khcc = True
+                        break
+            if not is_khcc:
+                external_authors.append(auth['author']['display_name'])
+        
+        # Create links between KHCC authors and external authors
+        for khcc_author in khcc_authors:
+            for ext_author in external_authors:
+                khcc_collaborations.append((khcc_author, ext_author))
     
-    # Count frequencies of collaborations
-    collaboration_counts = Counter(all_links)
-    
-    # Get top 10 KHCC authors by number of collaborations
+    # Count collaborations for KHCC authors
     khcc_author_counts = Counter()
-    for (khcc_author, _), count in collaboration_counts.items():
-        khcc_author_counts[khcc_author] += count
+    for khcc_author, _ in khcc_collaborations:
+        khcc_author_counts[khcc_author] += 1
+    
+    # Get top 10 KHCC authors
     top_khcc_authors = [author for author, _ in khcc_author_counts.most_common(10)]
     
-    # Get top 10 collaborators for these KHCC authors
+    # Get top 10 external collaborators for these KHCC authors
     external_author_counts = Counter()
-    for (khcc_author, external_author), count in collaboration_counts.items():
+    for khcc_author, ext_author in khcc_collaborations:
         if khcc_author in top_khcc_authors:
-            external_author_counts[external_author] += count
+            external_author_counts[ext_author] += 1
     top_external_authors = [author for author, _ in external_author_counts.most_common(10)]
     
-    # Create node lists and get their indices
+    # Create nodes and get indices
     nodes = top_khcc_authors + top_external_authors
     node_indices = {node: idx for idx, node in enumerate(nodes)}
     
-    # Create source, target, and value lists for Sankey diagram
+    # Create source, target, and value lists
     sources = []
     targets = []
     values = []
     
-    for (khcc_author, external_author), count in collaboration_counts.items():
-        if khcc_author in top_khcc_authors and external_author in top_external_authors:
+    # Count specific collaborations between top authors
+    collaboration_counts = Counter(khcc_collaborations)
+    for (khcc_author, ext_author), count in collaboration_counts.items():
+        if khcc_author in top_khcc_authors and ext_author in top_external_authors:
             sources.append(node_indices[khcc_author])
-            targets.append(node_indices[external_author])
+            targets.append(node_indices[ext_author])
             values.append(count)
     
     fig_sankey = go.Figure(data=[go.Sankey(
@@ -569,9 +607,9 @@ def create_sankey_diagram():
             yanchor='top'
         ),
         font=dict(size=12),
-        height=800,
-        width=1200,
-        margin=dict(l=250, r=250, t=50, b=50)
+        height=600,
+        width=800,
+        margin=dict(l=150, r=150, t=50, b=50)
     )
     
     return fig_sankey
@@ -585,25 +623,32 @@ def extract_khcc_institution_country_links(authorships):
     external_institutions = []
     external_countries = []
     
-    # First identify KHCC authors and collect external institutions/countries
+    # First identify KHCC authors
     for authorship in authorships:
-        is_khcc_author = False
+        is_khcc = False
         author_name = authorship['author']['display_name']
         
         if 'institutions' in authorship:
             for inst in authorship['institutions']:
-                if inst['display_name'] == "King Hussein Cancer Center":
-                    is_khcc_author = True
+                if inst.get('id') == 'https://openalex.org/I2799468983':
+                    is_khcc = True
                     khcc_authors.append(author_name)
                     break
-                
-        if not is_khcc_author:
+    
+    # Then collect external institutions and countries from non-KHCC authors
+    for authorship in authorships:
+        author_name = authorship['author']['display_name']
+        if author_name not in khcc_authors:  # if not a KHCC author
             if 'institutions' in authorship:
                 for inst in authorship['institutions']:
-                    external_institutions.append((author_name, inst['display_name']))
+                    if inst.get('id') != 'https://openalex.org/I2799468983':  # not KHCC
+                        for khcc_author in khcc_authors:
+                            external_institutions.append((khcc_author, inst['display_name']))
+            
             if 'countries' in authorship:
                 for country in authorship['countries']:
-                    external_countries.append((author_name, country))
+                    for khcc_author in khcc_authors:
+                        external_countries.append((khcc_author, country))
     
     return khcc_authors, external_institutions, external_countries
 
@@ -628,7 +673,7 @@ def create_institution_country_sankeys():
         khcc_author_counts[author] = inst_count + country_count
     top_khcc_authors = [author for author, _ in khcc_author_counts.most_common(10)]
     
-    # Count frequencies for institutions and countries
+    # Count frequencies for institutions and countries (only for top 10 KHCC authors)
     institution_counts = Counter(dict(Counter(x[1] for x in all_institution_links 
                                             if x[0] in top_khcc_authors)))
     country_counts = Counter(dict(Counter(x[1] for x in all_country_links 
@@ -637,12 +682,6 @@ def create_institution_country_sankeys():
     # Get top 10 institutions and countries
     top_institutions = [inst for inst, _ in institution_counts.most_common(10)]
     top_countries = [country for country, _ in country_counts.most_common(10)]
-    
-    # Filter links to only include top 10 KHCC authors and top institutions/countries
-    filtered_inst_links = [(author, inst) for author, inst in all_institution_links 
-                          if author in top_khcc_authors and inst in top_institutions]
-    filtered_country_links = [(author, country) for author, country in all_country_links 
-                            if author in top_khcc_authors and country in top_countries]
     
     # Create Institution Sankey
     inst_nodes = top_khcc_authors + top_institutions
@@ -655,7 +694,7 @@ def create_institution_country_sankeys():
     # Count author-institution collaborations
     for author in top_khcc_authors:
         for inst in top_institutions:
-            count = sum(1 for a, i in filtered_inst_links if a == author and i == inst)
+            count = sum(1 for a, i in all_institution_links if a == author and i == inst)
             if count > 0:
                 inst_sources.append(inst_node_indices[author])
                 inst_targets.append(inst_node_indices[inst])
@@ -686,9 +725,9 @@ def create_institution_country_sankeys():
             yanchor='top'
         ),
         font=dict(size=12),
-        height=800,
-        width=1200,
-        margin=dict(l=250, r=250, t=50, b=50)
+        height=600,
+        width=800,
+        margin=dict(l=150, r=150, t=50, b=50)
     )
     
     # Create Country Sankey
@@ -702,7 +741,7 @@ def create_institution_country_sankeys():
     # Count author-country collaborations
     for author in top_khcc_authors:
         for country in top_countries:
-            count = sum(1 for a, c in filtered_country_links if a == author and c == country)
+            count = sum(1 for a, c in all_country_links if a == author and c == country)
             if count > 0:
                 country_sources.append(country_node_indices[author])
                 country_targets.append(country_node_indices[country])
@@ -733,12 +772,177 @@ def create_institution_country_sankeys():
             yanchor='top'
         ),
         font=dict(size=12),
-        height=800,
-        width=1200,
-        margin=dict(l=250, r=250, t=50, b=50)
+        height=600,
+        width=800,
+        margin=dict(l=150, r=150, t=50, b=50)
     )
     
     return fig_inst_sankey, fig_country_sankey
+
+def standardize_department_name(dept_name):
+    """Standardize department names, combining similar departments"""
+    if not dept_name:
+        return None
+        
+    # Combine Medical Oncology with Internal Medicine
+    if any(name in dept_name for name in ["Medical Oncology", "Internal Medicine", "Medicine"]):
+        return "Department of Internal Medicine"
+    
+    if any(name in dept_name for name in ["Diagnostic Radiology", "Radiology"]):
+        return "Department of Diagnostic Radiology"
+    
+    if any(name in dept_name for name in ["Pediatrics", "Pediatric Oncology"]):
+        return "Department of Pediatrics"
+    
+    return dept_name
+
+def extract_khcc_department(raw_affiliation):
+    """Extract department name from KHCC raw affiliation string"""
+    if not isinstance(raw_affiliation, str):
+        return None
+    
+    # Check if this is a KHCC affiliation
+    if "King Hussein Cancer Center" not in raw_affiliation:
+        return None
+    
+    # Common department patterns
+    dept_patterns = [
+        "Department of",
+        "Departments of",
+        "Division of",
+        "Divisions of",
+        "Section of",
+        "Sections of"
+    ]
+    
+    # Try to find department name
+    for pattern in dept_patterns:
+        if pattern in raw_affiliation:
+            # Split by pattern and take the relevant part
+            parts = raw_affiliation.split(pattern)
+            if len(parts) > 1:
+                # Take the text after the pattern until the next comma or 'King Hussein'
+                dept_text = parts[1].split(',')[0].split('King Hussein')[0].strip()
+                if dept_text:
+                    dept_name = f"{pattern} {dept_text}"
+                    return standardize_department_name(dept_name)
+    
+    return None
+
+def create_department_charts():
+    """Create Sankey and bar charts for KHCC department collaborations"""
+    dept_collaborations = []
+    dept_counts = Counter()
+    
+    print("\nStarting department extraction...")
+    
+    for authorships in papers_df['authorships'].dropna():
+        if isinstance(authorships, str):
+            authorships = json.loads(authorships)
+            
+        paper_depts = set()  # Use set to avoid duplicates within same paper
+        
+        # Process each author
+        for auth in authorships:
+            # Check if author is from KHCC
+            is_khcc_author = False
+            for inst in auth.get('institutions', []):
+                if inst.get('id') == 'https://openalex.org/I2799468983':
+                    is_khcc_author = True
+                    break
+            
+            if is_khcc_author:
+                # Process all raw affiliation strings for this author
+                for raw_aff in auth.get('raw_affiliation_strings', []):
+                    dept = extract_khcc_department(raw_aff)
+                    if dept:
+                        print(f"Found department: {dept}")  # Debug print
+                        paper_depts.add(dept)
+        
+        # Add departments found in this paper
+        for dept in paper_depts:
+            dept_counts[dept] += 1
+        
+        # Create collaboration links between departments
+        paper_depts = list(paper_depts)
+        for i, dept1 in enumerate(paper_depts):
+            for dept2 in paper_depts[i+1:]:
+                if dept1 != dept2:
+                    dept_collaborations.append(tuple(sorted([dept1, dept2])))
+    
+    print("\nDepartment counts:", dict(dept_counts))
+    print("\nDepartment collaborations:", dict(Counter(dept_collaborations)))
+    
+    if not dept_counts:
+        print("No departments found!")
+        return go.Figure(), go.Figure()
+    
+    # Create DataFrame with explicit numeric type for Count
+    dept_df = pd.DataFrame(list(dept_counts.items()), columns=['Department', 'Count'])
+    dept_df['Count'] = pd.to_numeric(dept_df['Count'], errors='coerce')
+    dept_df = dept_df.sort_values('Count', ascending=True).tail(10)
+    
+    # Get top 10 departments list
+    top_departments = dept_df['Department'].tolist()
+    
+    # Create bar chart
+    fig_dept_bar = px.bar(dept_df,
+                         x='Count',
+                         y='Department',
+                         orientation='h',
+                         title='Top 10 KHCC Departments by Publication Count')
+    fig_dept_bar.update_layout(
+        yaxis={'categoryorder': 'total ascending'},
+        height=600,
+        width=800
+    )
+    
+    # Create Sankey diagram
+    dept_collab_counts = Counter(dept_collaborations)
+    nodes = top_departments
+    node_indices = {node: idx for idx, node in enumerate(nodes)}
+    
+    sources = []
+    targets = []
+    values = []
+    
+    for (dept1, dept2), count in dept_collab_counts.items():
+        if dept1 in top_departments and dept2 in top_departments:
+            sources.append(node_indices[dept1])
+            targets.append(node_indices[dept2])
+            values.append(count)
+    
+    fig_dept_sankey = go.Figure(data=[go.Sankey(
+        node = dict(
+            pad = 50,
+            thickness = 20,
+            line = dict(color = "black", width = 0.5),
+            label = nodes,
+            color = ["#1f77b4"] * len(nodes)
+        ),
+        link = dict(
+            source = sources,
+            target = targets,
+            value = values
+        ),
+        arrangement = "snap"
+    )])
+    
+    fig_dept_sankey.update_layout(
+        title=dict(
+            text="Collaboration Network between Top 10 KHCC Departments",
+            y=0.95,
+            x=0.5,
+            xanchor='center',
+            yanchor='top'
+        ),
+        font=dict(size=12),
+        height=600,
+        width=800,
+        margin=dict(l=150, r=150, t=50, b=50)
+    )
+    
+    return fig_dept_sankey, fig_dept_bar
 
 # Then modify the tab_overview definition to include these charts
 tab_overview = dbc.Card(
@@ -789,34 +993,40 @@ tab_collaboration = dbc.Card(
             dbc.Col([
                 html.H5("Author Collaboration Network", className="text-center"),
                 dcc.Graph(figure=create_sankey_diagram())
-            ], width=12)
+            ], width=6),
+            dbc.Col([
+                html.H5("Top External Collaborating Authors", className="text-center"),
+                dcc.Graph(figure=create_frequency_charts()[3])
+            ], width=6)
         ], className="mt-4"),
         dbc.Row([
             dbc.Col([
                 html.H5("Institution Collaboration Network", className="text-center"),
                 dcc.Graph(figure=create_institution_country_sankeys()[0])
-            ], width=12)
+            ], width=6),
+            dbc.Col([
+                html.H5("Top Collaborating Institutions", className="text-center"),
+                dcc.Graph(figure=create_frequency_charts()[0])
+            ], width=6)
         ], className="mt-4"),
         dbc.Row([
             dbc.Col([
                 html.H5("Country Collaboration Network", className="text-center"),
                 dcc.Graph(figure=create_institution_country_sankeys()[1])
-            ], width=12)
-        ], className="mt-4"),
-        dbc.Row([
-            dbc.Col([
-                html.H5("Top External Collaborating Authors", className="text-center"),
-                dcc.Graph(figure=create_frequency_charts()[3])
-            ], width=12)
-        ], className="mt-4"),
-        dbc.Row([
-            dbc.Col([
-                html.H5("Top Collaborating Institutions", className="text-center"),
-                dcc.Graph(figure=create_frequency_charts()[0])
             ], width=6),
             dbc.Col([
                 html.H5("Top Collaborating Countries", className="text-center"),
                 dcc.Graph(figure=create_frequency_charts()[1])
+            ], width=6)
+        ], className="mt-4"),
+        dbc.Row([
+            dbc.Col([
+                html.H5("Department Collaboration Network", className="text-center"),
+                dcc.Graph(figure=create_department_charts()[0])
+            ], width=6),
+            dbc.Col([
+                html.H5("Top KHCC Departments", className="text-center"),
+                dcc.Graph(figure=create_department_charts()[1])
             ], width=6)
         ], className="mt-4")
     ]),
@@ -1213,4 +1423,5 @@ def update_page_size(selected_size):
 # ------------------------------------------------------------------------------
 if __name__ == '__main__':
     app.run_server(debug=True, port=8050)
+
 
