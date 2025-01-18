@@ -2,7 +2,7 @@
 
 ## Table Schema
 ```sql
-CREATE TABLE papers ( -- Core identifiers paper_id TEXT PRIMARY KEY, doi TEXT, pmid TEXT, openalex_id TEXT, -- Basic metadata title TEXT, publication_date TEXT, publication_year INTEGER, -- Journal information journal_name TEXT, journal_issn TEXT, impact_factor REAL, quartile TEXT, -- Authors and institutions authors TEXT, authorships TEXT, institutions TEXT, -- Content abstract TEXT, abstract_summary TEXT, keywords TEXT, -- Metrics citations INTEGER, referenced_works_count INTEGER, -- Classification type TEXT, concepts TEXT, mesh TEXT, topics TEXT, -- Access information is_open_access BOOLEAN, pdf_url TEXT, -- Bibliographic volume TEXT, issue TEXT, pages TEXT, -- Additional metadata is_retracted BOOLEAN, language TEXT, source TEXT, raw_data TEXT, -- Timestamps and tracking created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP )
+CREATE TABLE papers ( -- Core identifiers paper_id TEXT PRIMARY KEY, doi TEXT, pmid TEXT, openalex_id TEXT, -- Basic metadata title TEXT, publication_date TEXT, publication_year INTEGER, -- Journal information journal_name TEXT, journal_issn TEXT, impact_factor REAL, quartile TEXT, -- Authors and institutions authors TEXT, authorships TEXT, institutions TEXT, -- Content abstract TEXT, abstract_summary TEXT, keywords TEXT, -- Metrics citations INTEGER, referenced_works_count INTEGER, -- Classification type TEXT, concepts TEXT, mesh TEXT, topics TEXT, -- Access information open_access BOOLEAN, pdf_url TEXT, -- Bibliographic volume TEXT, issue TEXT, pages TEXT, -- Additional metadata is_retracted BOOLEAN, language TEXT, source TEXT, raw_data TEXT, -- Timestamps and tracking created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP )
 ```
 
 ## First Row Details
@@ -37,7 +37,7 @@ updated_at2025-01-10 23:04:54
 - **concepts**: TEXT
 - **mesh**: TEXT
 - **topics**: TEXT
-- **is_open_access**: BOOLEAN
+- **open_access**: BOOLEAN
 - **pdf_url**: TEXT
 - **volume**: TEXT
 - **issue**: TEXT
