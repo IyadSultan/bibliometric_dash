@@ -89,29 +89,53 @@ class BibliometricData:
         Fields from vw_bibliometric_papers_summary:
           paper_id, title, publication_date, publication_year, publication_month,
           journal, impact_factor, quartile, citations, open_access,
-          publication_type, authorships, concepts, mesh_terms
+          publication_type, authors_text, concepts_text, mesh_terms_text,
+          authorships_json, concepts_json, mesh_json
         """
         query = """
-            SELECT paper_id, title, publication_date, publication_year,
-                   publication_month, journal, impact_factor, quartile, citations,
-                   open_access, publication_type, authorships, concepts, mesh_terms
+            SELECT 
+                paper_id, 
+                title, 
+                publication_date, 
+                publication_year,
+                publication_month, 
+                journal, 
+                impact_factor, 
+                quartile, 
+                citations,
+                open_access, 
+                publication_type,
+                authors_text,
+                concepts_text,
+                mesh_terms_text,
+                authorships_json,
+                concepts_json,
+                mesh_json
             FROM vw_bibliometric_papers_summary
-            ORDER BY publication_date
+            ORDER BY publication_date DESC
         """
         with self.db.get_connection() as conn:
             df = pd.read_sql(query, conn)
-        # Clean up, parse JSON columns
-        df['publication_year']   = df['publication_year'].fillna(0).astype(int)
-        df['publication_month']  = df['publication_month'].fillna(0).astype(int)
-        df['journal']            = df['journal'].fillna('Unknown Journal')
-        df['impact_factor']      = df['impact_factor'].fillna(0.0)
-        df['quartile']           = df['quartile'].fillna('Unknown')
-        df['citations']          = df['citations'].fillna(0)
-        df['open_access']        = df['open_access'].fillna(0)
-
-        for col in ['authorships','concepts','mesh_terms']:
-            df[col] = df[col].apply(self._safe_json_loads)
-
+        
+        # Clean up numeric fields
+        df['publication_year'] = df['publication_year'].fillna(0).astype(int)
+        df['publication_month'] = df['publication_month'].fillna(0).astype(int)
+        df['journal'] = df['journal'].fillna('Unknown Journal')
+        df['impact_factor'] = df['impact_factor'].fillna(0.0)
+        df['quartile'] = df['quartile'].fillna('Unknown')
+        df['citations'] = df['citations'].fillna(0)
+        df['open_access'] = df['open_access'].fillna(0)
+        
+        # Parse JSON fields for detailed views
+        df['authorships'] = df['authorships_json'].apply(self._safe_json_loads)
+        df['concepts'] = df['concepts_json'].apply(self._safe_json_loads)
+        df['mesh_terms'] = df['mesh_json'].apply(self._safe_json_loads)
+        
+        # Use pre-computed text fields
+        df['authors'] = df['authors_text']
+        df['concepts_display'] = df['concepts_text']
+        df['mesh_terms_display'] = df['mesh_terms_text']
+        
         return df
 
     def get_khcc_authors(self):
@@ -128,7 +152,7 @@ class BibliometricData:
         """
         with self.db.get_connection() as conn:
             df = pd.read_sql(query, conn)
-        df['is_corresponding'] = df['is_corresponding'].fillna(False).astype(int)
+        df['is_corresponding'] = df['is_corresponding'].fillna(False).astype(bool)
         df['quartile']         = df['quartile'].fillna('Unknown')
         df['journal_name']     = df['journal_name'].fillna('Unknown Journal')
         df['impact_factor']    = df['impact_factor'].fillna(0.0)
@@ -198,18 +222,49 @@ class BibliometricData:
     def get_collaborations(self):
         """
         Fields in vw_bibliometric_collaborations:
-          author1, author2, collaboration_count, collaboration_years,
-          dept1_list, dept2_list, dept_collaboration_count, collaboration_type
+        author1, author2, collaboration_count, collaboration_years,
+        dept1_list, dept2_list, dept_collaboration_count, collaboration_type
         """
-        query = """
-            SELECT author1, author2, collaboration_count, collaboration_years,
-                   dept1_list, dept2_list, dept_collaboration_count,
-                   collaboration_type
-            FROM vw_bibliometric_collaborations
-        """
-        with self.db.get_connection() as conn:
-            return pd.read_sql(query, conn)
-
+        try:
+            query = """
+                SELECT author1, author2, collaboration_count, collaboration_years,
+                    dept1_list, dept2_list, dept_collaboration_count,
+                    collaboration_type
+                FROM vw_bibliometric_collaborations
+                WHERE collaboration_count > 0
+            """
+            with self.db.get_connection() as conn:
+                df = pd.read_sql(query, conn)
+                
+            # Clean up the data
+            df['dept1_list'] = df['dept1_list'].fillna('Unknown')
+            df['dept2_list'] = df['dept2_list'].fillna('Unknown')
+            df['dept_collaboration_count'] = df['dept_collaboration_count'].fillna(0).astype(int)
+            df['collaboration_count'] = df['collaboration_count'].fillna(0).astype(int)
+            df['collaboration_years'] = df['collaboration_years'].fillna('')
+            df['collaboration_type'] = df['collaboration_type'].fillna('coauthor')
+            
+            # Convert collaboration_years string to list of years
+            df['years_list'] = df['collaboration_years'].apply(
+                lambda x: sorted([int(y) for y in x.split(',')]) if x else []
+            )
+            
+            # Add additional metrics
+            df['first_collaboration'] = df['years_list'].apply(lambda x: min(x) if x else None)
+            df['latest_collaboration'] = df['years_list'].apply(lambda x: max(x) if x else None)
+            df['collaboration_span'] = df['years_list'].apply(lambda x: len(set(x)) if x else 0)
+        
+            return df
+            
+        except Exception as e:
+            print(f"Warning: Collaboration query failed: {e}")
+            # Return empty DataFrame with expected columns
+            return pd.DataFrame(columns=[
+                'author1', 'author2', 'collaboration_count', 'collaboration_years',
+                'dept1_list', 'dept2_list', 'dept_collaboration_count',
+                'collaboration_type', 'years_list', 'first_collaboration',
+                'latest_collaboration', 'collaboration_span'
+            ])
 
 # ------------------------------------------------------------------------------
 # 3. Data Loading & Caching
@@ -294,17 +349,22 @@ def create_overview_figures(df):
 fig_pubs, fig_cites = create_overview_figures(papers_df)
 
 if not authors_df.empty:
-    authors_df["is_corresponding"] = authors_df["is_corresponding"].fillna(0)
     # group by author
     author_metrics = (
         authors_df.groupby("author_name")
-        .agg({"paper_id":"count","citations":"sum","is_corresponding":"sum"})
+        .agg({
+            "paper_id": "nunique",  # count unique papers
+            "citations": "sum",
+            "is_corresponding": "sum"
+        })
         .reset_index()
-        .rename(columns={"paper_id":"paper_count"})
+        .rename(columns={
+            "paper_id": "paper_count",
+            "is_corresponding": "corresponding_count"
+        })
     )
     author_metrics["citations_per_paper"] = (
-        author_metrics["citations"]/author_metrics["paper_count"]
-        if author_metrics["paper_count"].sum()>0 else 0
+        author_metrics["citations"] / author_metrics["paper_count"]
     )
 
     fig_author_impact = px.scatter(
@@ -312,38 +372,39 @@ if not authors_df.empty:
         x="paper_count",
         y="citations",
         size="citations_per_paper",
-        color="is_corresponding",
+        color="corresponding_count",
         hover_name="author_name",
         title="Author Impact Analysis",
         labels={
-            "paper_count":"Number of Papers",
-            "citations":"Total Citations",
-            "is_corresponding":"Times as Corresponding Author"
+            "paper_count": "Number of Papers",
+            "citations": "Total Citations",
+            "corresponding_count": "Times as Corresponding Author"
         }
     )
 
     # position distribution
     author_pos_counts = (
-        authors_df.groupby(["author_name","author_position"])
+        authors_df.groupby(["author_name", "author_position"])
         .size()
         .unstack(fill_value=0)
         .reset_index()
     )
-    for pos in ["first","middle","last"]:
+    for pos in ["first", "middle", "last", "unknown"]:
         if pos not in author_pos_counts.columns:
             author_pos_counts[pos] = 0
-    author_pos_counts["total_papers"] = author_pos_counts[["first","middle","last"]].sum(axis=1)
+    author_pos_counts["total_papers"] = author_pos_counts[["first", "middle", "last", "unknown"]].sum(axis=1)
     top_20_authors = author_pos_counts.nlargest(20, "total_papers")
 
     fig_author_positions = go.Figure()
-    for pos in ["first","middle","last"]:
-        fig_author_positions.add_trace(
-            go.Bar(
-                name=pos.capitalize(),
-                x=top_20_authors["author_name"],
-                y=top_20_authors[pos]
+    for pos in ["first", "middle", "last", "unknown"]:
+        if pos in top_20_authors.columns:
+            fig_author_positions.add_trace(
+                go.Bar(
+                    name=pos.capitalize(),
+                    x=top_20_authors["author_name"],
+                    y=top_20_authors[pos]
+                )
             )
-        )
     fig_author_positions.update_layout(
         barmode="stack",
         title="Author Position Distribution (Top 20)",
@@ -620,17 +681,95 @@ def create_institution_country_sankeys():
     return create_sankey_diagram(), create_sankey_diagram()
 
 def create_department_charts():
-    """
-    Create empty charts if department data is unavailable.
-    """
-    fig = go.Figure()
-    fig.add_annotation(
-        text="Department data unavailable",
-        showarrow=False,
-        font=dict(size=14)
+    """Create Sankey and bar charts for KHCC department collaborations"""
+    dept_collaborations = []
+    dept_counts = Counter()
+    
+    # Use the modified schema from vw_bibliometric_collaborations
+    collaborations_df = data_cache.get('collaboration_network')
+    
+    if collaborations_df.empty:
+        empty_fig = go.Figure()
+        empty_fig.add_annotation(
+            text="Collaboration network data unavailable",
+            showarrow=False,
+            font=dict(size=14)
+        )
+        empty_fig.update_layout(
+            title="Department Collaboration Network (Data Unavailable)",
+            height=600,
+            width=800
+        )
+        return empty_fig, empty_fig
+    
+    # Process department lists from the modified schema
+    for _, row in collaborations_df.iterrows():
+        # Split department lists and remove 'Unknown' values
+        depts1 = [d.strip() for d in row['dept1_list'].split(',') if d.strip() and d.strip() != 'Unknown'] if row['dept1_list'] else []
+        depts2 = [d.strip() for d in row['dept2_list'].split(',') if d.strip() and d.strip() != 'Unknown'] if row['dept2_list'] else []
+        
+        # Count unique departments
+        for dept in depts1 + depts2:
+            dept_counts[dept] += 1
+        
+        # Create collaboration links between departments
+        for dept1 in depts1:
+            for dept2 in depts2:
+                if dept1 != dept2:
+                    dept_collaborations.append((dept1, dept2))
+    
+    # Create department collaboration network
+    G = nx.Graph()
+    collab_counts = Counter(dept_collaborations)
+    
+    # Add nodes and edges to the graph
+    for (dept1, dept2), count in collab_counts.items():
+        G.add_edge(dept1, dept2, weight=count)
+    
+    # Create Sankey diagram
+    departments = list(dept_counts.keys())
+    dept_to_idx = {dept: idx for idx, dept in enumerate(departments)}
+    
+    sankey_fig = go.Figure(data=[go.Sankey(
+        node=dict(
+            pad=15,
+            thickness=20,
+            line=dict(color="black", width=0.5),
+            label=departments,
+            color=["#1f77b4"] * len(departments)
+        ),
+        link=dict(
+            source=[dept_to_idx[d1] for (d1, d2) in collab_counts.keys()],
+            target=[dept_to_idx[d2] for (d1, d2) in collab_counts.keys()],
+            value=list(collab_counts.values())
+        )
+    )])
+    sankey_fig.update_layout(
+        title="Department Collaboration Network",
+        font=dict(size=12),
+        height=600,
+        width=800
     )
-    fig.update_layout(height=400)
-    return fig, fig
+    
+    # Create bar chart of department collaboration counts
+    # Convert Counter to DataFrame
+    dept_df = pd.DataFrame(list(dept_counts.items()), columns=['Department', 'Collaborations'])
+    dept_df = dept_df.sort_values('Collaborations', ascending=True)  # Sort for better visualization
+    
+    bar_fig = px.bar(
+        dept_df,
+        x='Collaborations',
+        y='Department',
+        orientation='h',
+        title="Department Collaboration Frequency"
+    )
+    bar_fig.update_layout(
+        xaxis_title="Number of Collaborations",
+        yaxis_title="Department",
+        height=400
+    )
+    
+    return sankey_fig, bar_fig
 
 def create_enhanced_topic_graph(df, min_papers=3, min_connections=2):
     """
@@ -929,7 +1068,7 @@ tab_publication_types = dbc.Card(
     className="mt-3"
 )
 
-# 5.7 Publications List Tab (unchanged, but we remove references to pmid/abstract)
+# 5.7 Publications List Tab
 def flatten_authors(row):
     auths = row.get('authorships')
     if not auths: return ''
@@ -940,6 +1079,22 @@ def flatten_authors(row):
     # build comma list
     return ', '.join(a['author']['display_name'] for a in auths if 'author' in a)
 
+def flatten_concepts(concepts):
+    """Convert concepts list to readable string"""
+    if not concepts: return ''
+    if isinstance(concepts, str):
+        try: concepts = json.loads(concepts)
+        except: return ''
+    return ', '.join(c.get('display_name','') for c in concepts if 'display_name' in c)
+
+def flatten_mesh_terms(terms):
+    """Convert mesh_terms list to readable string"""
+    if not terms: return ''
+    if isinstance(terms, str):
+        try: terms = json.loads(terms)
+        except: return ''
+    return ', '.join(str(term) for term in terms if term)
+
 pubs_sorted = papers_df.sort_values(by=['publication_year','publication_month'], ascending=[False,False]).copy()
 table_data = []
 for _,r in pubs_sorted.iterrows():
@@ -948,56 +1103,93 @@ for _,r in pubs_sorted.iterrows():
         "authors": flatten_authors(r),
         "journal": r["journal"],
         "publication_year": r["publication_year"],
-        "publication_month":r["publication_month"],
+        "publication_month": r["publication_month"],
         "citations": r["citations"],
         "details": "🔍 View",
-        # keep raw fields if needed:
+        # Convert complex fields to strings
         "quartile": r["quartile"],
         "impact_factor": r["impact_factor"],
-        "open_access": r["open_access"],
+        "open_access": int(r["open_access"]) if pd.notnull(r["open_access"]) else 0,
         "publication_type": r["publication_type"],
-        "concepts": r["concepts"],
-        "mesh_terms": r["mesh_terms"],
+        "concepts": flatten_concepts(r["concepts"]),
+        "mesh_terms": flatten_mesh_terms(r["mesh_terms"]),
     })
 
+# Create the publications table
 publications_table = dash_table.DataTable(
     id='publications-table',
     columns=[
-        {"name":"Title","id":"title"},
-        {"name":"Authors","id":"authors"},
-        {"name":"Journal","id":"journal"},
-        {"name":"Year","id":"publication_year","type":"numeric"},
-        {"name":"Month","id":"publication_month","type":"numeric"},
-        {"name":"Citations","id":"citations","type":"numeric"},
-        {"name":"Details","id":"details","presentation":"markdown"},
+        {'name': 'Title', 'id': 'title'},
+        {'name': 'Authors', 'id': 'authors_text'},
+        {'name': 'Journal', 'id': 'journal'},
+        {'name': 'Year', 'id': 'publication_year', 'type': 'numeric'},
+        {'name': 'Month', 'id': 'publication_month', 'type': 'numeric'},
+        {'name': 'Citations', 'id': 'citations', 'type': 'numeric'},
+        {'name': 'Details', 'id': 'details', 'presentation': 'markdown'}
     ],
-    data=table_data,
+    data=[{
+        'title': row['title'],
+        'authors_text': row['authors_text'],
+        'journal': row['journal'],
+        'publication_year': row['publication_year'],
+        'publication_month': row['publication_month'],
+        'citations': row['citations'],
+        'details': '🔍 View',
+        # Add these fields for the modal
+        'quartile': row['quartile'],
+        'impact_factor': row['impact_factor'],
+        'open_access': row['open_access'],
+        'publication_type': row['publication_type'],
+        'concepts_text': row['concepts_text'],
+        'mesh_terms_text': row['mesh_terms_text'],
+        'authorships_json': row['authorships_json']
+    } for row in papers_df.sort_values(
+        by=['publication_year', 'publication_month'],
+        ascending=[False, False]
+    ).to_dict('records')],
     page_size=50,
     page_action='native',
-    style_table={'overflowX':'auto'},
+    page_current=0,
+    style_table={'overflowX': 'auto'},
     style_cell={
-        'textAlign':'left',
-        'padding':'10px',
-        'whiteSpace':'normal',
-        'height':'auto',
+        'textAlign': 'left',
+        'padding': '10px',
+        'whiteSpace': 'normal',
+        'height': 'auto',
+        'minWidth': '100px',
+        'maxWidth': '400px',
+    },
+    style_cell_conditional=[
+        {'if': {'column_id': 'title'},
+         'maxWidth': '400px'},
+        {'if': {'column_id': 'authors_text'},
+         'maxWidth': '300px'},
+        {'if': {'column_id': 'journal'},
+         'maxWidth': '200px'},
+    ],
+    style_data={
+        'whiteSpace': 'normal',
+        'height': 'auto',
     },
     style_header={
-        'backgroundColor':'rgb(230,230,230)',
-        'fontWeight':'bold'
+        'backgroundColor': 'rgb(230, 230, 230)',
+        'fontWeight': 'bold'
     },
     style_data_conditional=[{
-        'if': {'column_id':'details'},
-        'cursor':'pointer',
-        'color':'#007bff',
-        'textDecoration':'none',
-        'fontWeight':'bold'
+        'if': {'column_id': 'details'},
+        'cursor': 'pointer',
+        'color': '#007bff',
+        'textDecoration': 'none',
+        'fontWeight': 'bold'
     }],
+    tooltip_delay=0,
+    tooltip_duration=None,
     sort_action='native',
     filter_action='native',
-    filter_options={'case':'insensitive'},
+    filter_options={'case': 'insensitive'},
     sort_by=[
-        {'column_id':'publication_year','direction':'desc'},
-        {'column_id':'publication_month','direction':'desc'}
+        {'column_id': 'publication_year', 'direction': 'desc'},
+        {'column_id': 'publication_month', 'direction': 'desc'}
     ]
 )
 
@@ -1161,59 +1353,65 @@ def toggle_modal(active_cell, close_clicks, is_open):
         return False
     return is_open if is_open else False
 
+
 @app.callback(
-    Output("paper-details-content","children"),
-    Input("publications-table","active_cell"),
-    [State("publications-table","derived_virtual_data"),
-     State("publications-table","page_current"),
-     State("publications-table","page_size")]
+    Output("paper-details-content", "children"),
+    Input("publications-table", "active_cell"),
+    [State("publications-table", "derived_virtual_data"),
+     State("publications-table", "page_current"),
+     State("publications-table", "page_size")]
 )
 def show_paper_details(active_cell, virtual_data, page_current, page_size):
     if not active_cell or not virtual_data:
         return "Click on a paper to see details"
 
     try:
-        idx = (page_current*page_size)+active_cell["row"]
+        idx = active_cell["row"]
         row = virtual_data[idx]
-        # Show minimal info about the paper
-        # e.g. Title, Journal, Year, Month, Citations, Impact Factor, Concepts, Mesh Terms
-        # Format authors bold if from KHCC? We'll skip that here.
+        
         content = [
             html.H5(row["title"], className="mb-3"),
             dbc.Row([
                 dbc.Col([
-                    html.P([html.Strong("Journal: "), row.get("journal","Unknown")]),
-                    html.P([html.Strong("Year: "), row.get("publication_year","")]),
-                    html.P([html.Strong("Month: "), row.get("publication_month","")]),
+                    html.P([html.Strong("Journal: "), row.get("journal", "Unknown")]),
+                    html.P([html.Strong("Year: "), str(row.get("publication_year", ""))]),
+                    html.P([html.Strong("Month: "), str(row.get("publication_month", ""))]),
                 ], width=6),
                 dbc.Col([
-                    html.P([html.Strong("Citations: "), row.get("citations",0)]),
-                    html.P([html.Strong("Quartile: "), row.get("quartile","Unknown")]),
-                    html.P([html.Strong("Impact Factor: "), f"{row.get('impact_factor',0):.2f}"]),
+                    html.P([html.Strong("Citations: "), str(row.get("citations", 0))]),
+                    html.P([html.Strong("Quartile: "), row.get("quartile", "Unknown")]),
+                    html.P([html.Strong("Impact Factor: "), f"{row.get('impact_factor', 0):.2f}"]),
                 ], width=6)
             ], className="mb-3"),
-
-            # Show open_access or publication_type if you want:
-            html.P([html.Strong("Open Access: "), row.get("open_access",0)]),
-            html.P([html.Strong("Publication Type: "), row.get("publication_type","Unknown")]),
-
-            html.P([html.Strong("Authors: "), row.get("authors","")]),
+            html.P([html.Strong("Open Access: "), "Yes" if row.get("open_access", 0) == 1 else "No"]),
+            html.P([html.Strong("Publication Type: "), row.get("publication_type", "Unknown")]),
+            html.Div([
+                html.Strong("Authors: "),
+                html.P(row.get("authors_text", ""), className="mt-2"),
+            ], className="mb-3"),
         ]
-        # Show concepts, mesh_terms if present
-        concepts_list = row.get("concepts",[])
-        mesh_list     = row.get("mesh_terms",[])
-        if concepts_list and isinstance(concepts_list,list):
-            c_names = [c.get("display_name","") for c in concepts_list]
-            content.append(html.P([html.Strong("Concepts: "), ", ".join(c_names)]))
-        if mesh_list and isinstance(mesh_list,list):
-            content.append(html.P([html.Strong("Mesh Terms: "), ", ".join(mesh_list)]))
+
+        # Add research topics if available
+        if row.get('concepts_text'):
+            content.append(html.Div([
+                html.Strong("Research Topics: "),
+                html.P(row["concepts_text"], className="mt-2"),
+            ], className="mb-3"))
+
+        # Add MeSH terms if available
+        if row.get('mesh_terms_text'):
+            content.append(html.Div([
+                html.Strong("MeSH Terms: "),
+                html.P(row["mesh_terms_text"], className="mt-2"),
+            ], className="mb-3"))
 
         return content
     except Exception as e:
         return html.Div([
             "Error loading paper details",
             html.Pre(str(e))
-        ], style={'color':'red'})
+        ], style={'color': 'red'})
+    
 
 @app.callback(
     Output('publications-table','filter_query'),
