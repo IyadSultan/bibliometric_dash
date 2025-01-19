@@ -266,6 +266,69 @@ class BibliometricData:
                 'latest_collaboration', 'collaboration_span'
             ])
 
+
+# Add this right after the class definitions and before load_data()
+def extract_collaborations_from_papers(papers_df):
+    """Extract collaboration data from papers dataframe."""
+    institution_collaborations = []
+    country_collaborations = []
+    
+    for _, paper in papers_df.iterrows():
+        authorships = paper.get('authorships')
+        if not isinstance(authorships, list):
+            try:
+                authorships = json.loads(authorships) if authorships else []
+            except:
+                continue
+                
+        # Get KHCC and non-KHCC institutions/countries for this paper
+        external_institutions = []
+        external_countries = []
+        
+        for authorship in authorships:
+            institutions = authorship.get('institutions', [])
+            is_khcc = False
+            
+            # Check if author is from KHCC
+            for inst in institutions:
+                if inst.get('display_name') == "King Hussein Cancer Center":
+                    is_khcc = True
+                    break
+            
+            # If not KHCC, collect institution and country
+            if not is_khcc:
+                for inst in institutions:
+                    inst_name = inst.get('display_name')
+                    country_code = inst.get('country_code')
+                    
+                    if inst_name and inst_name != "King Hussein Cancer Center":
+                        external_institutions.append(inst_name)
+                    if country_code:
+                        external_countries.append(country_code)
+        
+        # Add collaborations for this paper
+        for inst in set(external_institutions):
+            institution_collaborations.append({
+                'institution': inst,
+                'collaboration_count': 1
+            })
+            
+        for country in set(external_countries):
+            country_collaborations.append({
+                'country_code': country,
+                'collaboration_count': 1
+            })
+    
+    # Aggregate collaboration counts
+    inst_df = pd.DataFrame(institution_collaborations)
+    country_df = pd.DataFrame(country_collaborations)
+    
+    if not inst_df.empty:
+        inst_df = inst_df.groupby('institution')['collaboration_count'].sum().reset_index()
+    if not country_df.empty:
+        country_df = country_df.groupby('country_code')['collaboration_count'].sum().reset_index()
+        
+    return inst_df, country_df
 # ------------------------------------------------------------------------------
 # 3. Data Loading & Caching
 # ------------------------------------------------------------------------------
@@ -273,19 +336,16 @@ def load_data():
     biblio = BibliometricData()
     data = {}
     try:
-        data['papers']                = biblio.get_papers_summary()
-        data['authors']               = biblio.get_khcc_authors()
-        data['journals']              = biblio.get_journal_metrics()
-        data['topics']                = biblio.get_research_topics()
-        data['author_productivity']   = biblio.get_author_productivity()
-        data['collaborations']        = biblio.get_collaborating_institutions()
+        data['papers'] = biblio.get_papers_summary()
+        data['authors'] = biblio.get_khcc_authors()
+        data['journals'] = biblio.get_journal_metrics()
+        data['topics'] = biblio.get_research_topics()
+        data['author_productivity'] = biblio.get_author_productivity()
         
-        # Try to get collaboration network, but don't fail if unavailable
-        try:
-            data['collaboration_network'] = biblio.get_collaborations()
-        except Exception as e:
-            print(f"Warning: Could not load collaboration network data: {e}")
-            data['collaboration_network'] = pd.DataFrame()  # Empty DataFrame as fallback
+        # Extract collaborations directly from papers
+        inst_df, country_df = extract_collaborations_from_papers(data['papers'])
+        data['institution_collaborations'] = inst_df
+        data['country_collaborations'] = country_df
             
     except Exception as e:
         print(f"Error loading data: {e}")
@@ -658,103 +718,174 @@ def create_sankey_diagram():
     )
     return fig
 
+
 def create_institution_country_sankeys():
-    """
-    Create simplified Sankey diagrams if collaboration data is unavailable.
-    """
-    if data_cache['collaboration_network'].empty:
-        fig = go.Figure()
-        fig.add_annotation(
-            text="Collaboration network data unavailable",
-            showarrow=False,
-            font=dict(size=14)
-        )
-        fig.update_layout(
-            title="Institution/Country Network (Data Unavailable)",
-            height=600,
-            width=800
-        )
-        return fig, fig
+    """Create Sankey diagrams for institution and country collaborations."""
+    # Extract collaboration data from papers
+    inst_df, country_df = extract_collaborations_from_papers(papers_df)
     
-    # Original Sankey diagram code here if data is available
-    # Return two sankey figs
-    return create_sankey_diagram(), create_sankey_diagram()
+    if inst_df.empty or country_df.empty:
+        return create_empty_figure("Institution Network"), create_empty_figure("Country Network")
+    
+    # Create institution Sankey
+    top_institutions = inst_df.nlargest(20, 'collaboration_count')
+    inst_nodes = ["KHCC"] + top_institutions['institution'].tolist()
+    inst_node_map = {node: idx for idx, node in enumerate(inst_nodes)}
+    
+    # Create links from KHCC to each institution
+    inst_sources = [0] * len(top_institutions)  # KHCC is always source (index 0)
+    inst_targets = [inst_node_map[inst] for inst in top_institutions['institution']]
+    inst_values = top_institutions['collaboration_count'].tolist()
+    
+    inst_fig = go.Figure(data=[go.Sankey(
+        node=dict(
+            pad=15,
+            thickness=20,
+            line=dict(color="black", width=0.5),
+            label=inst_nodes,
+            color=["#1f77b4"] + ["#ff7f0e"] * len(top_institutions)
+        ),
+        link=dict(
+            source=inst_sources,
+            target=inst_targets,
+            value=inst_values
+        )
+    )])
+    inst_fig.update_layout(
+        title="Institution Collaboration Network",
+        font=dict(size=12),
+        height=600
+    )
+    
+    # Create country Sankey
+    top_countries = country_df.nlargest(20, 'collaboration_count')
+    country_nodes = ["Jordan"] + [
+        pycountry.countries.get(alpha_2=code).name 
+        if pycountry.countries.get(alpha_2=code) else code
+        for code in top_countries['country_code']
+    ]
+    
+    # Create links from Jordan to each country
+    country_sources = [0] * len(top_countries)  # Jordan is always source (index 0)
+    country_targets = list(range(1, len(top_countries) + 1))
+    country_values = top_countries['collaboration_count'].tolist()
+    
+    country_fig = go.Figure(data=[go.Sankey(
+        node=dict(
+            pad=15,
+            thickness=20,
+            line=dict(color="black", width=0.5),
+            label=country_nodes,
+            color=["#1f77b4"] + ["#ff7f0e"] * len(top_countries)
+        ),
+        link=dict(
+            source=country_sources,
+            target=country_targets,
+            value=country_values
+        )
+    )])
+    country_fig.update_layout(
+        title="Country Collaboration Network",
+        font=dict(size=12),
+        height=600
+    )
+    
+    return inst_fig, country_fig
+
+def create_empty_figure(title):
+    """Helper function to create empty figure with message"""
+    fig = go.Figure()
+    fig.add_annotation(
+        text=f"{title} data unavailable",
+        showarrow=False,
+        font=dict(size=14)
+    )
+    fig.update_layout(
+        title=title,
+        height=600
+    )
+    return fig
 
 def create_department_charts():
     """Create Sankey and bar charts for KHCC department collaborations"""
+    # Get collaboration data
+    collab_df = data_cache.get('collaboration_network', pd.DataFrame())
+    
+    if collab_df.empty:
+        return create_empty_figure("Department Network"), create_empty_figure("Department Bar Chart")
+    
+    # Process department collaborations
     dept_collaborations = []
     dept_counts = Counter()
     
-    # Use the modified schema from vw_bibliometric_collaborations
-    collaborations_df = data_cache.get('collaboration_network')
-    
-    if collaborations_df.empty:
-        empty_fig = go.Figure()
-        empty_fig.add_annotation(
-            text="Collaboration network data unavailable",
-            showarrow=False,
-            font=dict(size=14)
-        )
-        empty_fig.update_layout(
-            title="Department Collaboration Network (Data Unavailable)",
-            height=600,
-            width=800
-        )
-        return empty_fig, empty_fig
-    
-    # Process department lists from the modified schema
-    for _, row in collaborations_df.iterrows():
-        # Split department lists and remove 'Unknown' values
-        depts1 = [d.strip() for d in row['dept1_list'].split(',') if d.strip() and d.strip() != 'Unknown'] if row['dept1_list'] else []
-        depts2 = [d.strip() for d in row['dept2_list'].split(',') if d.strip() and d.strip() != 'Unknown'] if row['dept2_list'] else []
+    # Process department lists
+    for _, row in collab_df.iterrows():
+        # Split department lists and clean
+        depts1 = [d.strip() for d in row['dept1_list'].split(',') if d.strip() and d.strip() != 'Unknown']
+        depts2 = [d.strip() for d in row['dept2_list'].split(',') if d.strip() and d.strip() != 'Unknown']
         
-        # Count unique departments
-        for dept in depts1 + depts2:
-            dept_counts[dept] += 1
+        # Count departments
+        for dept in set(depts1 + depts2):
+            dept_counts[dept] += row['collaboration_count']
         
-        # Create collaboration links between departments
+        # Create collaboration pairs
         for dept1 in depts1:
             for dept2 in depts2:
                 if dept1 != dept2:
-                    dept_collaborations.append((dept1, dept2))
+                    dept_collaborations.append((dept1, dept2, row['collaboration_count']))
     
-    # Create department collaboration network
-    G = nx.Graph()
-    collab_counts = Counter(dept_collaborations)
+    # Get top 15 departments by collaboration count
+    top_depts = dict(sorted(dept_counts.items(), key=lambda x: x[1], reverse=True)[:15])
     
-    # Add nodes and edges to the graph
-    for (dept1, dept2), count in collab_counts.items():
-        G.add_edge(dept1, dept2, weight=count)
+    # Filter collaborations to only include top departments
+    filtered_collaborations = [
+        (d1, d2, count) for d1, d2, count in dept_collaborations 
+        if d1 in top_depts and d2 in top_depts
+    ]
+    
+    # Create nodes list and mapping
+    nodes = list(top_depts.keys())
+    node_map = {node: idx for idx, node in enumerate(nodes)}
+    
+    # Aggregate collaboration counts between departments
+    collab_counts = {}
+    for d1, d2, count in filtered_collaborations:
+        key = tuple(sorted([d1, d2]))
+        collab_counts[key] = collab_counts.get(key, 0) + count
+    
+    # Create Sankey diagram data
+    sources = []
+    targets = []
+    values = []
+    for (d1, d2), count in collab_counts.items():
+        sources.append(node_map[d1])
+        targets.append(node_map[d2])
+        values.append(count)
     
     # Create Sankey diagram
-    departments = list(dept_counts.keys())
-    dept_to_idx = {dept: idx for idx, dept in enumerate(departments)}
-    
     sankey_fig = go.Figure(data=[go.Sankey(
         node=dict(
             pad=15,
             thickness=20,
             line=dict(color="black", width=0.5),
-            label=departments,
-            color=["#1f77b4"] * len(departments)
+            label=nodes,
+            color=["#1f77b4"] * len(nodes)
         ),
         link=dict(
-            source=[dept_to_idx[d1] for (d1, d2) in collab_counts.keys()],
-            target=[dept_to_idx[d2] for (d1, d2) in collab_counts.keys()],
-            value=list(collab_counts.values())
+            source=sources,
+            target=targets,
+            value=values
         )
     )])
     sankey_fig.update_layout(
-        title="Department Collaboration Network",
+        title="Department Collaboration Network (Top 15 Departments)",
         font=dict(size=12),
-        height=600,
-        width=800
+        height=600
     )
     
-    # Create bar chart of department collaboration counts
-    # Convert Counter to DataFrame
-    dept_df = pd.DataFrame(list(dept_counts.items()), columns=['Department', 'Collaborations'])
-    dept_df = dept_df.sort_values('Collaborations', ascending=True)  # Sort for better visualization
+    # Create bar chart
+    dept_df = pd.DataFrame(list(top_depts.items()), columns=['Department', 'Collaborations'])
+    dept_df = dept_df.sort_values('Collaborations', ascending=True)
     
     bar_fig = px.bar(
         dept_df,
@@ -764,9 +895,10 @@ def create_department_charts():
         title="Department Collaboration Frequency"
     )
     bar_fig.update_layout(
+        height=600,
         xaxis_title="Number of Collaborations",
         yaxis_title="Department",
-        height=400
+        yaxis={'categoryorder': 'total ascending'}
     )
     
     return sankey_fig, bar_fig
@@ -932,21 +1064,11 @@ tab_collaboration = dbc.Card(
         ]),
         dbc.Row([
             dbc.Col([
-                html.H5("Author Collaboration Network", className="text-center"),
-                dcc.Graph(figure=create_sankey_diagram())
-            ], width=6),
-            dbc.Col([
-                html.H5("Top External Collaborating Authors", className="text-center"),
-                dcc.Graph(figure=fig_authors)
-            ], width=6)
-        ], className="mt-4"),
-        dbc.Row([
-            dbc.Col([
                 html.H5("Institution Collaboration Network", className="text-center"),
                 dcc.Graph(figure=create_institution_country_sankeys()[0])
             ], width=6),
             dbc.Col([
-                html.H5("Top Collaborating Institutions", className="text-center"),
+                html.H5("Top 20 Collaborating Institutions", className="text-center"),
                 dcc.Graph(figure=fig_inst)
             ], width=6)
         ], className="mt-4"),
@@ -956,7 +1078,7 @@ tab_collaboration = dbc.Card(
                 dcc.Graph(figure=create_institution_country_sankeys()[1])
             ], width=6),
             dbc.Col([
-                html.H5("Top Collaborating Countries", className="text-center"),
+                html.H5("Top 20 Collaborating Countries", className="text-center"),
                 dcc.Graph(figure=fig_country)
             ], width=6)
         ], className="mt-4"),
@@ -966,7 +1088,7 @@ tab_collaboration = dbc.Card(
                 dcc.Graph(figure=create_department_charts()[0])
             ], width=6),
             dbc.Col([
-                html.H5("Top KHCC Departments", className="text-center"),
+                html.H5("Department Collaboration Frequency", className="text-center"),
                 dcc.Graph(figure=create_department_charts()[1])
             ], width=6)
         ], className="mt-4")
